@@ -93,15 +93,12 @@ enum AppEvent {
     WinMinimize,
     WinMaximizeToggle,
     WinClose,
-    FocusSearchBar,
     ToggleBookmark,
     TrimMemory,
     SubmitAddressBar(String),
     PickSuggestion(usize),
     AddressTextChanged,
     AddressFocusChanged(bool),
-    AddrHoverInside,
-    AddrHoverLeave,
     OmniboxKey(OmniboxNavKey),
     CancelAddressEdit,
     GoBack,
@@ -163,10 +160,7 @@ struct AppState {
     anim_start: Option<Instant>,
     anim_duration_ms: f64,
     anim_timer_active: bool,
-    pending_addr_focus: bool,
     suppress_hover_until_exit: bool,
-    addr_hold_sidebar: bool,
-    skip_next_addr_focus_hold: bool,
     popup_menu_open: bool,
     expand_timer_active: bool,
     collapse_timer_active: bool,
@@ -197,10 +191,7 @@ fn compute_sidebar_expanded(
 
 impl AppState {
     fn has_sidebar_hold(&self) -> bool {
-        self.addr_hold_sidebar
-            || self.addr_user_editing
-            || self.omnibox.is_visible()
-            || self.renaming_folder.is_some()
+        self.renaming_folder.is_some()
             || self.sidebar_drag.is_some()
             || self.popup_menu_open
     }
@@ -309,24 +300,22 @@ fn should_arm_hover_expand(
     !sidebar_pinned && hover_expand && !hover_open && !suppress_until_exit && in_sidebar
 }
 
-fn cursor_in_sidebar_or_omnibox(st: &AppState) -> bool {
+fn cursor_in_sidebar(st: &AppState) -> bool {
     unsafe {
         let mut screen_pt = POINT::default();
         if GetCursorPos(&mut screen_pt).is_err() {
             return false;
         }
         let hit = WindowFromPoint(screen_pt);
-        if hit.0.is_null() {
+        if hit.0.is_null() || hit == st.addr_hwnd {
             return false;
         }
-        if st.omnibox.is_visible()
-            && !st.omnibox.hwnd.0.is_null()
+        if !st.omnibox.hwnd.0.is_null()
             && (hit == st.omnibox.hwnd || IsChild(st.omnibox.hwnd, hit).as_bool())
         {
-            return true;
+            return false;
         }
         let is_ours = hit == st.parent_hwnd
-            || hit == st.addr_hwnd
             || hit == st.rename_hwnd
             || IsChild(st.parent_hwnd, hit).as_bool();
         if !is_ours {
@@ -521,8 +510,6 @@ fn main() {
             AddrBarEvent::Escape => AppEvent::CancelAddressEdit,
             AddrBarEvent::OmniboxKey(k) => AppEvent::OmniboxKey(k),
             AddrBarEvent::FocusChanged(focused) => AppEvent::AddressFocusChanged(focused),
-            AddrBarEvent::HoverInside => AppEvent::AddrHoverInside,
-            AddrBarEvent::HoverLeave => AppEvent::AddrHoverLeave,
             AddrBarEvent::Shortcut(act) => AppEvent::Shortcut(act),
             AddrBarEvent::Repaint => AppEvent::Repaint,
         };
@@ -584,10 +571,7 @@ fn main() {
         anim_start: None,
         anim_duration_ms: 0.0,
         anim_timer_active: false,
-        pending_addr_focus: false,
         suppress_hover_until_exit: false,
-        addr_hold_sidebar: false,
-        skip_next_addr_focus_hold: false,
         popup_menu_open: false,
         expand_timer_active: false,
         collapse_timer_active: false,
@@ -788,7 +772,7 @@ fn main() {
                         }
                         if !st.sidebar_pinned
                             && st.sidebar_hover_open
-                            && !cursor_in_sidebar_or_omnibox(&st)
+                            && !cursor_in_sidebar(&st)
                         {
                             arm_collapse_timer(&mut st);
                         }
@@ -803,7 +787,7 @@ fn main() {
                         ui::hide_folder_rename_edit(st.rename_hwnd);
                         if !st.sidebar_pinned
                             && st.sidebar_hover_open
-                            && !cursor_in_sidebar_or_omnibox(&st)
+                            && !cursor_in_sidebar(&st)
                         {
                             arm_collapse_timer(&mut st);
                         }
@@ -965,10 +949,6 @@ fn main() {
                     }
                 }
 
-                AppEvent::FocusSearchBar => {
-                    focus_address_bar(&state);
-                }
-
                 AppEvent::ToggleBookmark => {
                     {
                         let mut st = state.borrow_mut();
@@ -996,17 +976,10 @@ fn main() {
                         let mut st = state.borrow_mut();
                         let picked = st.omnibox.selected_url();
                         st.omnibox.hide();
-                        st.pending_addr_focus = false;
-                        st.addr_hold_sidebar = false;
                         st.addr_user_editing = false;
-                        if !cursor_in_sidebar_or_omnibox(&st) {
-                            st.sidebar_hover_open = false;
-                            cancel_expand_timer(&mut st);
-                        }
                         picked.unwrap_or(raw_input)
                     };
                     navigate_active_tab(&state, &web_context, &proxy, &target);
-                    sync_sidebar_layout(&state);
                 }
 
                 AppEvent::PickSuggestion(idx) => {
@@ -1020,19 +993,12 @@ fn main() {
                             .get(idx)
                             .map(|s| s.url.clone());
                         st.omnibox.hide();
-                        st.pending_addr_focus = false;
-                        st.addr_hold_sidebar = false;
                         st.addr_user_editing = false;
-                        if !cursor_in_sidebar_or_omnibox(&st) {
-                            st.sidebar_hover_open = false;
-                            cancel_expand_timer(&mut st);
-                        }
                         url
                     };
                     if let Some(url) = target {
                         navigate_active_tab(&state, &web_context, &proxy, &url);
                     }
-                    sync_sidebar_layout(&state);
                 }
 
                 AppEvent::AddressTextChanged => {
@@ -1059,25 +1025,10 @@ fn main() {
 
                 AppEvent::AddressFocusChanged(focused) => {
                     if !focused {
-                        {
-                            let mut st = state.borrow_mut();
-                            st.addr_user_editing = false;
-                            st.addr_hold_sidebar = false;
-                            st.omnibox.hide();
-                            if !cursor_in_sidebar_or_omnibox(&st) {
-                                st.sidebar_hover_open = false;
-                                cancel_expand_timer(&mut st);
-                            }
-                        }
-                        sync_sidebar_layout(&state);
-                    } else {
                         let mut st = state.borrow_mut();
-                        if st.skip_next_addr_focus_hold {
-                            st.skip_next_addr_focus_hold = false;
-                        } else {
-                            st.addr_hold_sidebar = true;
-                        }
-                        drop(st);
+                        st.addr_user_editing = false;
+                        st.omnibox.hide();
+                    } else {
                         let query = ui::get_address_bar_text(addr_hwnd);
                         if query.trim().is_empty() {
                             let st = state.borrow();
@@ -1095,21 +1046,6 @@ fn main() {
                                 &st.layout,
                                 suggestions,
                             );
-                        }
-                    }
-                }
-
-                AppEvent::AddrHoverInside => {
-                    let mut st = state.borrow_mut();
-                    cancel_collapse_timer(&mut st);
-                }
-
-                AppEvent::AddrHoverLeave => {
-                    let mut st = state.borrow_mut();
-                    if !cursor_in_sidebar_or_omnibox(&st) {
-                        cancel_expand_timer(&mut st);
-                        if !st.sidebar_pinned && st.sidebar_hover_open {
-                            arm_collapse_timer(&mut st);
                         }
                     }
                 }
@@ -1142,30 +1078,17 @@ fn main() {
                 }
 
                 AppEvent::CancelAddressEdit => {
-                    let mut collapse_check = false;
                     {
                         let mut st = state.borrow_mut();
                         st.addr_user_editing = false;
-                        st.pending_addr_focus = false;
                         if st.omnibox.is_visible() {
                             st.omnibox.hide();
-                        } else {
-                            st.addr_hold_sidebar = false;
-                            if !cursor_in_sidebar_or_omnibox(&st) {
-                                st.sidebar_hover_open = false;
-                                cancel_expand_timer(&mut st);
-                            }
-                            collapse_check = true;
-                            if let Some(tab) = st.tab_store.active_tab() {
-                                ui::set_address_bar_text(st.addr_hwnd, &tab.url);
-                                if let Some(ref wv) = tab.webview {
-                                    wv.focus();
-                                }
+                        } else if let Some(tab) = st.tab_store.active_tab() {
+                            ui::set_address_bar_text(st.addr_hwnd, &tab.url);
+                            if let Some(ref wv) = tab.webview {
+                                wv.focus();
                             }
                         }
-                    }
-                    if collapse_check {
-                        sync_sidebar_layout(&state);
                     }
                     invalidate_chrome(parent_hwnd);
                 }
@@ -1396,7 +1319,6 @@ fn main() {
 fn begin_folder_rename(state: &Rc<RefCell<AppState>>, fid: FolderId) {
     let (needs_snap, parent_hwnd) = {
         let mut st = state.borrow_mut();
-        st.pending_addr_focus = false;
         let need = !st.layout.sidebar_expanded;
         if need {
             cancel_sidebar_anim_timer(&mut st);
@@ -1548,7 +1470,7 @@ fn show_folder_context_menu(
         {
             let mut st = state.borrow_mut();
             st.popup_menu_open = false;
-            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar_or_omnibox(&st) {
+            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar(&st) {
                 arm_collapse_timer(&mut st);
             }
         }
@@ -1677,7 +1599,7 @@ fn show_tab_context_menu(
         {
             let mut st = state.borrow_mut();
             st.popup_menu_open = false;
-            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar_or_omnibox(&st) {
+            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar(&st) {
                 arm_collapse_timer(&mut st);
             }
         }
@@ -1825,7 +1747,7 @@ fn show_shields_menu(
         {
             let mut st = state.borrow_mut();
             st.popup_menu_open = false;
-            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar_or_omnibox(&st) {
+            if !st.sidebar_pinned && st.sidebar_hover_open && !cursor_in_sidebar(&st) {
                 arm_collapse_timer(&mut st);
             }
         }
@@ -2146,13 +2068,10 @@ fn toggle_sidebar(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND) {
     let was_expanded = {
         let mut st = state.borrow_mut();
         let prev = st.layout.sidebar_expanded;
-        st.pending_addr_focus = false;
         if st.sidebar_pinned {
             st.sidebar_pinned = false;
             st.sidebar_hover_open = false;
-            st.addr_hold_sidebar = false;
-            st.addr_user_editing = false;
-            st.suppress_hover_until_exit = cursor_in_sidebar_or_omnibox(&st);
+            st.suppress_hover_until_exit = cursor_in_sidebar(&st);
             cancel_expand_timer(&mut st);
             cancel_collapse_timer(&mut st);
             if st.renaming_folder.take().is_some() {
@@ -2178,7 +2097,7 @@ fn toggle_sidebar(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND) {
 
 fn apply_sidebar_ratio(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND, ratio: f64) {
     let ratio = ratio.clamp(0.0, 1.0);
-    let (focus_addr, focus_wv_fallback) = {
+    {
         let mut st = state.borrow_mut();
         let old_scale = st.layout.dpi_scale;
         st.sidebar_ratio = ratio;
@@ -2208,46 +2127,13 @@ fn apply_sidebar_ratio(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND, ratio: 
         }
 
         if st.omnibox.is_visible() {
-            if st.layout.sidebar_expanded {
-                st.omnibox.sync_geometry(parent_hwnd, &st.layout);
-            } else {
-                st.omnibox.hide();
-            }
+            st.omnibox.sync_geometry(parent_hwnd, &st.layout);
         }
 
         let bounds = st.layout.content_bounds();
         if let Some(tab) = st.tab_store.active_tab() {
             if let Some(ref wv) = tab.webview {
                 engine::set_bounds(wv, bounds);
-            }
-        }
-
-        let focus_addr = if st.layout.sidebar_expanded && st.pending_addr_focus {
-            st.pending_addr_focus = false;
-            Some(st.addr_hwnd)
-        } else {
-            None
-        };
-        let focus_wv = if !st.layout.sidebar_expanded && ui::is_address_bar_focused(st.addr_hwnd) {
-            st.tab_store
-                .active_tab()
-                .and_then(|t| t.webview.as_ref().map(|_| t.id))
-        } else {
-            None
-        };
-        (focus_addr, focus_wv)
-    };
-
-    if let Some(addr_hwnd) = focus_addr {
-        unsafe {
-            let _ = SetFocus(addr_hwnd);
-            SendMessageW(addr_hwnd, EM_SETSEL, WPARAM(0), LPARAM(-1));
-        }
-    } else if let Some(tid) = focus_wv_fallback {
-        let st = state.borrow();
-        if let Some(tab) = st.tab_store.get_tab(tid) {
-            if let Some(ref wv) = tab.webview {
-                wv.focus();
             }
         }
     }
@@ -2287,7 +2173,7 @@ fn advance_sidebar_animation(state: &Rc<RefCell<AppState>>, hwnd: HWND) {
         apply_sidebar_ratio(state, hwnd, next_ratio);
         if finished {
             let mut st = state.borrow_mut();
-            if st.suppress_hover_until_exit && !cursor_in_sidebar_or_omnibox(&st) {
+            if st.suppress_hover_until_exit && !cursor_in_sidebar(&st) {
                 st.suppress_hover_until_exit = false;
             }
         }
@@ -2313,11 +2199,18 @@ fn sync_sidebar_layout(state: &Rc<RefCell<AppState>>) {
                 ui::hide_folder_rename_edit(st.rename_hwnd);
             }
             st.sidebar_hover = SidebarHit::None;
-            st.topbar_hover = None;
-            st.omnibox.hide();
-            st.addr_user_editing = false;
-            st.addr_hold_sidebar = false;
-            st.pending_addr_focus = false;
+            if !matches!(
+                st.topbar_hover,
+                Some(
+                    TopbarButton::WinMinimize
+                        | TopbarButton::WinMaximize
+                        | TopbarButton::WinClose
+                        | TopbarButton::Shield
+                        | TopbarButton::BookmarkStar
+                )
+            ) {
+                st.topbar_hover = None;
+            }
         }
 
         let animations_on = ui::client_area_animations_enabled();
@@ -2329,37 +2222,22 @@ fn sync_sidebar_layout(state: &Rc<RefCell<AppState>>) {
             st.anim_to_ratio = to;
             st.anim_start = None;
             st.anim_duration_ms = 0.0;
-            Some((st.parent_hwnd, Some(to), None))
+            Some((st.parent_hwnd, Some(to)))
         } else {
             st.anim_from_ratio = from;
             st.anim_to_ratio = to;
             st.anim_duration_ms = dur_ms;
             st.anim_start = Some(Instant::now());
             arm_sidebar_anim_timer(&mut st);
-            let focus_wv = if !target && ui::is_address_bar_focused(st.addr_hwnd) {
-                st.tab_store
-                    .active_tab()
-                    .and_then(|t| t.webview.as_ref().map(|_| t.id))
-            } else {
-                None
-            };
-            Some((st.parent_hwnd, None, focus_wv))
+            Some((st.parent_hwnd, None))
         }
     };
 
-    if let Some((parent_hwnd, snap_ratio, focus_wv)) = action {
-        if let Some(tid) = focus_wv {
-            let st = state.borrow();
-            if let Some(tab) = st.tab_store.get_tab(tid) {
-                if let Some(ref wv) = tab.webview {
-                    wv.focus();
-                }
-            }
-        }
+    if let Some((parent_hwnd, snap_ratio)) = action {
         if let Some(ratio) = snap_ratio {
             apply_sidebar_ratio(state, parent_hwnd, ratio);
             let mut st = state.borrow_mut();
-            if st.suppress_hover_until_exit && !cursor_in_sidebar_or_omnibox(&st) {
+            if st.suppress_hover_until_exit && !cursor_in_sidebar(&st) {
                 st.suppress_hover_until_exit = false;
             }
         } else {
@@ -2469,9 +2347,6 @@ fn open_new_tab(
     let (id, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
         st.addr_user_editing = false;
-        if !is_start {
-            st.pending_addr_focus = false;
-        }
         st.omnibox.hide();
         background_current_active(&mut st);
         ensure_webview_budget(&mut st);
@@ -2528,17 +2403,11 @@ fn open_new_tab(
     sync_addr_bar_rect(&state.borrow());
     set_window_title(parent_hwnd, init_title);
     if is_start {
-        if state.borrow().layout.sidebar_expanded {
-            state.borrow_mut().skip_next_addr_focus_hold = true;
-            let addr_hwnd = state.borrow().addr_hwnd;
+        if ui::address_bar_frame_rect(&state.borrow().layout).right > 0 {
             unsafe {
                 let _ = SetFocus(addr_hwnd);
                 SendMessageW(addr_hwnd, EM_SETSEL, WPARAM(0), LPARAM(-1));
             }
-        } else if state.borrow().effective_sidebar_expanded() {
-            let mut st = state.borrow_mut();
-            st.skip_next_addr_focus_hold = true;
-            st.pending_addr_focus = true;
         } else {
             let st = state.borrow();
             if let Some(tab) = st.tab_store.get_tab(id) {
@@ -2560,10 +2429,6 @@ fn switch_to_tab(
     let (already_active, has_webview, url, title, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
         st.addr_user_editing = false;
-        st.pending_addr_focus = false;
-        if !ui::is_address_bar_focused(st.addr_hwnd) {
-            st.addr_hold_sidebar = false;
-        }
         st.omnibox.hide();
         if st.tab_store.get_tab(target_id).is_none() {
             return;
@@ -2691,7 +2556,6 @@ fn navigate_active_tab(
     let (active_id, has_wv, normalized, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
         st.addr_user_editing = false;
-        st.pending_addr_focus = false;
         let search_engine = st
             .browser_data
             .lock()
@@ -2766,24 +2630,19 @@ fn navigate_active_tab(
 }
 
 fn focus_address_bar(state: &Rc<RefCell<AppState>>) {
-    let parent_hwnd = {
-        let mut st = state.borrow_mut();
-        st.skip_next_addr_focus_hold = false;
-        st.addr_hold_sidebar = true;
-        st.suppress_hover_until_exit = false;
-        st.parent_hwnd
+    let (parent_hwnd, addr_hwnd, has_addr) = {
+        let st = state.borrow();
+        (
+            st.parent_hwnd,
+            st.addr_hwnd,
+            ui::address_bar_frame_rect(&st.layout).right > 0,
+        )
     };
-    sync_sidebar_layout(state);
-    let already_expanded = state.borrow().layout.sidebar_expanded;
-    if already_expanded {
-        state.borrow_mut().pending_addr_focus = false;
-        let addr_hwnd = state.borrow().addr_hwnd;
+    if has_addr {
         unsafe {
             let _ = SetFocus(addr_hwnd);
             SendMessageW(addr_hwnd, EM_SETSEL, WPARAM(0), LPARAM(-1));
         }
-    } else {
-        state.borrow_mut().pending_addr_focus = true;
     }
     invalidate_chrome(parent_hwnd);
 }
@@ -2926,7 +2785,7 @@ unsafe extern "system" fn subclass_proc(
         msg if msg == WM_NCMOUSELEAVE_MSG => {
             if let Ok(mut st) = state.try_borrow_mut() {
                 st.tracking_nc_mouse = false;
-                if !cursor_in_sidebar_or_omnibox(&st) {
+                if !cursor_in_sidebar(&st) {
                     st.suppress_hover_until_exit = false;
                     cancel_expand_timer(&mut st);
                     if !st.sidebar_pinned && st.sidebar_hover_open {
@@ -2949,7 +2808,7 @@ unsafe extern "system" fn subclass_proc(
                         && st.sidebar_hover_expand
                         && !st.sidebar_hover_open
                         && !st.suppress_hover_until_exit
-                        && cursor_in_sidebar_or_omnibox(&st)
+                        && cursor_in_sidebar(&st)
                     {
                         st.sidebar_hover_open = true;
                         true
@@ -2970,7 +2829,7 @@ unsafe extern "system" fn subclass_proc(
                     if !st.sidebar_pinned
                         && st.sidebar_hover_open
                         && !st.has_sidebar_hold()
-                        && !cursor_in_sidebar_or_omnibox(&st)
+                        && !cursor_in_sidebar(&st)
                     {
                         st.sidebar_hover_open = false;
                         true
@@ -3000,7 +2859,6 @@ unsafe extern "system" fn subclass_proc(
                 let can_forward = active.map(|t| t.can_go_forward).unwrap_or(false);
                 let is_loading = active.map(|t| t.is_loading).unwrap_or(false);
                 let blocked_count = active.map(|t| t.blocked_count).unwrap_or(0);
-                let has_wv = active.and_then(|t| t.webview.as_ref()).is_some();
                 let sec_icon = active
                     .map(|t| ui::security_icon_for_url(&t.url))
                     .unwrap_or(ui::SecurityIcon::Internal);
@@ -3026,12 +2884,12 @@ unsafe extern "system" fn subclass_proc(
                     shields_active,
                     blocked_count,
                     hover: st.topbar_hover,
-                    addr_focused: ui::is_address_bar_focused(st.addr_hwnd) || st.pending_addr_focus,
+                    addr_focused: ui::is_address_bar_focused(st.addr_hwnd),
                     has_update: st.ready_update.is_some(),
                     sidebar_pinned: st.sidebar_pinned,
                 };
 
-                ui::paint_frame_backdrop(hdc, &st.layout, &st.palette, nav, has_wv);
+                ui::paint_frame_backdrop(hdc, &st.layout, &st.palette, nav, &fav_cache);
 
                 let entries = st.tab_store.sidebar_entries();
                 if st.layout.sidebar_ratio >= 0.999 {
@@ -3069,7 +2927,6 @@ unsafe extern "system" fn subclass_proc(
                     let drag_target = st
                         .sidebar_drag
                         .and_then(|d| if d.active { d.target } else { None });
-                    let addr_text = ui::get_address_bar_text(st.addr_hwnd);
                     ui::paint_sidebar_transition(
                         hdc,
                         &st.layout,
@@ -3078,7 +2935,6 @@ unsafe extern "system" fn subclass_proc(
                         &entries,
                         st.tab_store.tabs.len(),
                         active_url,
-                        &addr_text,
                         st.tab_store.live_count(),
                         st.max_live_tabs,
                         st.sidebar_hover,
@@ -3127,7 +2983,7 @@ unsafe extern "system" fn subclass_proc(
                 let mut had_drag = false;
                 if let Ok(mut st) = state.try_borrow_mut() {
                     st.omnibox.hide();
-                    st.pending_addr_focus = false;
+                    st.addr_user_editing = false;
                     st.suppress_hover_until_exit = false;
                     if st.sidebar_drag.take().is_some() {
                         let _ = ReleaseCapture();
@@ -3140,8 +2996,6 @@ unsafe extern "system" fn subclass_proc(
                         cancel_expand_timer(&mut st);
                         cancel_collapse_timer(&mut st);
                         st.sidebar_hover_open = false;
-                        st.addr_hold_sidebar = false;
-                        st.addr_user_editing = false;
                         should_sync = true;
                     }
                 }
@@ -3232,12 +3086,11 @@ unsafe extern "system" fn subclass_proc(
                             TopbarButton::WinMinimize
                                 | TopbarButton::WinMaximize
                                 | TopbarButton::WinClose
+                                | TopbarButton::Shield
+                                | TopbarButton::BookmarkStar
                         )
                 });
                 if let Some(btn) = btn_opt {
-                    if btn != TopbarButton::RailSearch {
-                        st.pending_addr_focus = false;
-                    }
                     match btn {
                         TopbarButton::WinMinimize => {
                             let _ = proxy.send_event(AppEvent::WinMinimize);
@@ -3251,9 +3104,6 @@ unsafe extern "system" fn subclass_proc(
                         TopbarButton::ToggleSidebar => {
                             let _ = proxy.send_event(AppEvent::ToggleSidebar);
                         }
-                        TopbarButton::RailSearch => {
-                            let _ = proxy.send_event(AppEvent::FocusSearchBar);
-                        }
                         TopbarButton::Back => {
                             let _ = proxy.send_event(AppEvent::GoBack);
                         }
@@ -3264,7 +3114,7 @@ unsafe extern "system" fn subclass_proc(
                             let _ = proxy.send_event(AppEvent::ReloadOrStop);
                         }
                         TopbarButton::Shield => {
-                            let btns = ui::topbar_button_rects(&hit_layout, badge);
+                            let btns = ui::topbar_button_rects(&st.layout, badge);
                             let _ = proxy.send_event(AppEvent::OpenShieldsMenu {
                                 client_x: btns.shield.left,
                                 client_y: btns.shield.bottom + 4,
@@ -3284,20 +3134,7 @@ unsafe extern "system" fn subclass_proc(
                     return LRESULT(0);
                 }
 
-                st.pending_addr_focus = false;
-
-                if sidebar_interactive
-                    && hit_layout.sidebar_expanded
-                    && ui::point_in_rect(x, y, &ui::address_bar_frame_rect(&hit_layout))
-                {
-                    st.skip_next_addr_focus_hold = false;
-                    st.addr_hold_sidebar = true;
-                    if !st.layout.sidebar_expanded {
-                        st.pending_addr_focus = true;
-                        drop(st);
-                        sync_sidebar_layout(state);
-                        return LRESULT(0);
-                    }
+                if ui::point_in_rect(x, y, &ui::address_bar_frame_rect(&st.layout)) {
                     let addr = st.addr_hwnd;
                     drop(st);
                     unsafe {
@@ -3423,7 +3260,7 @@ unsafe extern "system" fn subclass_proc(
                     }
                     if !st.sidebar_pinned
                         && st.sidebar_hover_open
-                        && !cursor_in_sidebar_or_omnibox(&st)
+                        && !cursor_in_sidebar(&st)
                     {
                         arm_collapse_timer(&mut st);
                     }
@@ -3576,6 +3413,8 @@ unsafe extern "system" fn subclass_proc(
                             TopbarButton::WinMinimize
                                 | TopbarButton::WinMaximize
                                 | TopbarButton::WinClose
+                                | TopbarButton::Shield
+                                | TopbarButton::BookmarkStar
                         )
                 });
                 let new_sidebar = if sidebar_interactive {
@@ -3608,7 +3447,7 @@ unsafe extern "system" fn subclass_proc(
         WM_MOUSELEAVE => {
             if let Ok(mut st) = state.try_borrow_mut() {
                 st.tracking_mouse = false;
-                if !cursor_in_sidebar_or_omnibox(&st) {
+                if !cursor_in_sidebar(&st) {
                     st.suppress_hover_until_exit = false;
                     cancel_expand_timer(&mut st);
                     if !st.sidebar_pinned && st.sidebar_hover_open {

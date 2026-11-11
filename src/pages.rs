@@ -496,7 +496,7 @@ __CSS__
       __SVG_HERO__
       <h1>Kurowser</h1>
     </div>
-    <p class="hero-hint">Gunakan kolom pencarian di sidebar atau tekan <span class="hero-kbd">Ctrl+L</span></p>
+    <p class="hero-hint">Gunakan kolom pencarian di atas atau tekan <span class="hero-kbd">Ctrl+L</span></p>
   </header>
 
   <section id="bm-section" class="sec-wrap" aria-labelledby="bm-heading" style="display:none">
@@ -1783,7 +1783,7 @@ function renderUpdateUi() {
   const applyBtn = document.getElementById('btn-apply-update');
 
   const modeLabel = updateState.installed ? 'Terinstal' : 'Portabel';
-  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.2') + ' (' + modeLabel + ')';
+  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.3') + ' (' + modeLabel + ')';
 
   const st = updateState.status || 'idle';
   applyBtn.style.display = st === 'ready' ? '' : 'none';

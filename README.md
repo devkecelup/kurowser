@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/badge/website-Download%20Portal-0f766e?style=flat-square" alt="Download Portal" />
     </a>
     <a href="https://github.com/devkecelup/kurowser/releases/latest">
-      <img src="https://img.shields.io/badge/release-v1.1.2-334155?style=flat-square" alt="Release v1.1.2" />
+      <img src="https://img.shields.io/badge/release-v1.1.3-334155?style=flat-square" alt="Release v1.1.3" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square" alt="Windows x64" />
     <img src="https://img.shields.io/badge/portable-1.84%20MB-10b981?style=flat-square" alt="Portable 1.84 MB" />
@@ -39,9 +39,9 @@
 
 ### Antarmuka Native, Sidebar Vertikal, dan Bilah Kontrol
 
-Kurowser menggambar jendela Win32 tanpa bingkai sistem standar dan menempatkan tombol kontrol jendela (`Minimize`, `Maximize/Restore`, `Close`) di pojok kanan atas bilah judul `36px`. Area konten WebView2 dibingkai dengan sudut membulat agar menyatu dengan latar aplikasi.
+Kurowser menggambar jendela Win32 tanpa bingkai sistem standar dan menempatkan bilah pencarian (*URL & Search Bar* lengkap dengan indikator kunci, tombol Kurowser Shields, dan bintang bookmark) tepat di tengah topbar `42px` bersama tombol kontrol jendela (`Minimize`, `Maximize/Restore`, `Close`) di pojok kanan atas. Area konten WebView2 dibingkai dengan sudut membulat agar menyatu dengan latar aplikasi.
 
-- Secara bawaan, sidebar tampil ramping sebagai rail `50px` berisi deretan ikon tab, folder, Kurowser Shields, setelan, dan tombol tab baru. Arahkan kursor ke sidebar untuk melebarkannya secara halus ke `240px` (membuka bar pencarian dan kontrol navigasi), atau kunci posisinya lewat tombol toggle maupun `Ctrl + B`. Mode pelebaran otomatis saat hover bisa diatur di `kurowser://settings`.
+- Secara bawaan, sidebar tampil ramping sebagai rail `50px` berisi deretan ikon tab, folder, setelan, dan tombol tab baru. Arahkan kursor ke sidebar untuk melebarkannya secara halus ke `240px` (membuka kontrol navigasi, folder, tab tersemat, utilitas, dan tombol Hemat RAM) tanpa menggeser bilah pencarian di tengah topbar, atau kunci posisinya lewat tombol toggle maupun `Ctrl + B`. Mode pelebaran otomatis saat hover bisa diatur di `kurowser://settings`.
 - Font Poppins (Regular, Medium, SemiBold) ditanamkan langsung ke dalam binary, didampingi ikon vektor UI dan ikon merek SVG pada halaman internal.
 - Tersedia 6 preset tema (`Graphite`, `Paper`, `Nordic Pine`, `Mist`, `Espresso`, dan `Sand`) serta pengaturan warna aksen kustom dengan penyesuaian kontras teks dan batas elemen secara otomatis.
 
@@ -63,7 +63,7 @@ Kurowser Shields aktif secara bawaan dan mencegat permintaan jaringan di `WebRes
 
 - Aturan jaringan memblokir domain serta path iklan, pelacak, analitik, telemetri, popunder, dan penambang kripto, lalu menyembunyikan kontainer iklan kosong dengan *cosmetic filter* CSS.
 - Pada YouTube, skrip proteksi membersihkan objek iklan di halaman serta payload JSON `/youtubei/v1/` (`adPlacements`, `playerAds`, `adSlots`, `adBreakHeartbeatParams`) dan membantu melewati jeda iklan video yang tersisa.
-- Tombol Perisai di sidebar menampilkan jumlah permintaan yang diblokir pada tab aktif dan membuka menu kontrol untuk toggle Shields global, toggle *cosmetic filter*, atau mengecualikan situs tertentu (*allowlist*). Pencocokan *allowlist* di halaman memakai hash bergaram `BCryptGenRandom` per sesi proses.
+- Tombol Perisai di bilah pencarian tengah topbar menampilkan jumlah permintaan yang diblokir pada tab aktif dan membuka menu kontrol untuk toggle Shields global, toggle *cosmetic filter*, atau mengecualikan situs tertentu (*allowlist*). Pencocokan *allowlist* di halaman memakai hash bergaram `BCryptGenRandom` per sesi proses.
 
 <br />
 
@@ -103,7 +103,7 @@ Setiap rilis baru diperiksa langsung dari GitHub Releases API (`releases/latest`
 
 ```mermaid
 flowchart LR
-    UI["Win32 Native Chrome (Topbar Caption Kanan + Sidebar Search + Tab Folders)"] --> CTRL["AppState + LRU Tab Cap (2 sampai 4 Renderer)"]
+    UI["Win32 Native Chrome (Topbar Search Tengah + Caption Kanan + Rail 50px/240px)"] --> CTRL["AppState + LRU Tab Cap (2 sampai 4 Renderer)"]
     CTRL --> WV["WebView2 COM Engine (ICoreWebView2)"]
     WV --> REQ{"WebResourceRequested & Navigation Guards"}
     REQ -->|"Skema kurowser:// + CSP Nonce + BCrypt Token"| INT["Halaman & API Internal di Memori (Zero Localhost)"]
@@ -129,9 +129,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph KU["Kurowser v1.1.2"]
+    subgraph KU["Kurowser v1.1.3"]
         K1["Host: Rust + Win32 GDI"] --> K2["Engine: WebView2 Bawaan Windows"]
-        K2 --> K3["Rail 50px (Hover 240px) + Tab Folders + Shields"]
+        K2 --> K3["Topbar Search Tengah + Rail 50px (Hover 240px) + Tab Folders + Shields"]
         K3 --> K4["LRU Cap 2-4 Renderer + Skema kurowser://"]
     end
 
@@ -162,7 +162,7 @@ flowchart LR
 
 ```mermaid
 xychart-beta
-    title "Jejak Ukuran Binary v1.1.2 & Baseline Memori Kurowser (MB - Satuan Windows 1024x1024)"
+    title "Jejak Ukuran Binary v1.1.3 & Baseline Memori Kurowser (MB - Satuan Windows 1024x1024)"
     x-axis ["kurowser.exe", "KurowserSetup.exe", "Host Rust Private", "Host Rust Working Set", "Pohon Start Private", "Pohon Start Working Set"]
     y-axis "Megabyte (MB)" 0 --> 420
     bar [1.84, 2.74, 6.47, 34.86, 185.87, 386.74]
@@ -171,7 +171,7 @@ xychart-beta
 <br />
 
 > **Catatan Pengukuran:**
-> Ukuran binary `v1.1.2` adalah `kurowser.exe` `1.84 MB` (`1,933,312 byte`) dan `KurowserSetup.exe` `2.74 MB` (`2,875,904 byte`). Angka memori pada grafik merupakan baseline yang diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`v1.0.0`: host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
+> Ukuran binary `v1.1.3` adalah `kurowser.exe` `1.84 MB` (`1,928,704 byte`) dan `KurowserSetup.exe` `2.74 MB` (`2,871,296 byte`). Angka memori pada grafik merupakan baseline yang diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`v1.0.0`: host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
 
 <br />
 
@@ -179,7 +179,7 @@ xychart-beta
 
 <br />
 
-| Aspek | Kurowser v1.1.2 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
+| Aspek | Kurowser v1.1.3 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
 |---|---|---|---|---|---|---|---|
 | Basis engine | Microsoft Edge WebView2 OS | Chromium (bundled) | Chromium | Chromium (bundled) | Gecko (bundled) | Gecko (bundled) | Chromium (bundled) |
 | Stack UI host | Rust + Native Win32 GDI | Chromium UI | Chromium UI | Chromium UI | Gecko / XUL | Gecko / CSS Mod | Chromium + Swift / WinUI |
@@ -204,7 +204,7 @@ xychart-beta
 |---|---|
 | `Ctrl + T` | Buka tab baru (`kurowser://start`) |
 | `Ctrl + W` | Tutup tab aktif |
-| `Ctrl + L` | Fokus dan pilih teks di bar pencarian sidebar |
+| `Ctrl + L` | Fokus dan pilih teks di bilah pencarian topbar |
 | `Ctrl + B` | Sematkan atau lepaskan sidebar 240px dari mode rail 50px |
 | `Ctrl + D` | Simpan atau hapus bookmark halaman aktif |
 | `Ctrl + R` atau `F5` | Muat ulang halaman |
@@ -294,7 +294,7 @@ Untuk mengukur jejak memori `kurowser.exe` beserta sub-proses WebView2 saat apli
 | [`src/engine.rs`](src/engine.rs) | Integrasi WebView2 COM (`kurowser://` custom scheme, CSP nonce, API token, hook Shields, pembatasan izin) |
 | [`src/adblock.rs`](src/adblock.rs) | Pencocokan domain/path iklan Kurowser Shields, injeksi CSS kosmetik, proteksi iklan YouTube, dan hash *allowlist* |
 | [`src/tabs.rs`](src/tabs.rs) | Manajemen status tab, operasi Tab Folders, urutan sidebar, dan LRU eviction |
-| [`src/ui.rs`](src/ui.rs) | Rendering Win32 DPI-aware, top bar dengan tombol kanan atas, font Poppins, ikon vektor, popup omnibox, dan *inline rename* folder |
+| [`src/ui.rs`](src/ui.rs) | Rendering Win32 DPI-aware, top bar dengan bilah pencarian di tengah dan tombol kanan atas, font Poppins, ikon vektor, popup omnibox, dan *inline rename* folder |
 | [`src/pages.rs`](src/pages.rs) | Templat HTML/CSS/JS halaman internal (`start`, `history`, `bookmarks`, `downloads`, `settings`) dengan ikon SVG |
 | [`src/storage.rs`](src/storage.rs) | Penyimpanan JSON persisten, pembuatan token CSPRNG (`BCryptGenRandom`), normalisasi tema, dan sanitasi input/path |
 | [`src/omnibox.rs`](src/omnibox.rs) | Mesin peringkat saran URL dan kata kunci pencarian bar alamat |

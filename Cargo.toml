@@ -1,6 +1,6 @@
 [package]
 name = "kurowser"
-version = "1.1.2"
+version = "1.1.3"
 edition = "2021"
 description = "Lightweight native Windows browser in Rust + Win32 + WebView2 with Tab Folders, Kurowser Shields, and auto-updater"
 license = "MIT"

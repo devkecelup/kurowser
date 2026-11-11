@@ -21,7 +21,7 @@ use crate::storage::{Rgb, ThemePalette};
 use crate::tabs::{FolderId, SidebarEntry, TabId};
 
 // ── Layout constants (logical px at 96 DPI) ──
-pub const TOPBAR_HEIGHT: i32 = 36;
+pub const TOPBAR_HEIGHT: i32 = 42;
 pub const SIDEBAR_WIDTH: i32 = 240;
 pub const COLLAPSED_RAIL_WIDTH: i32 = 50;
 pub const FRAME_PAD: i32 = 8;
@@ -105,7 +105,6 @@ pub enum TopbarButton {
     WinMaximize,
     WinClose,
     ToggleSidebar,
-    RailSearch,
     Back,
     Forward,
     ReloadOrStop,
@@ -154,8 +153,6 @@ pub enum AddrBarEvent {
     Escape,
     OmniboxKey(OmniboxNavKey),
     FocusChanged(bool),
-    HoverInside,
-    HoverLeave,
     Shortcut(AcceleratorAction),
     Repaint,
 }
@@ -1098,7 +1095,7 @@ pub fn paint_frame_backdrop(
     layout: &Layout,
     palette: &ThemePalette,
     nav: NavVisualState,
-    _has_wv: bool,
+    favicons: &FaviconCache,
 ) {
     let bx = layout.topbar.left;
     let by = layout.topbar.top;
@@ -1123,25 +1120,34 @@ pub fn paint_frame_backdrop(
         FillRect(mem_dc, &local, bg_br);
         let _ = DeleteObject(bg_br);
 
+        let shift = |r: RECT| RECT {
+            left: r.left - bx,
+            top: r.top - by,
+            right: r.right - bx,
+            bottom: r.bottom - by,
+        };
+
         let btns = topbar_button_rects(layout, nav.has_shield_badge());
-        let cap_min = RECT {
-            left: btns.win_min.left - bx,
-            top: btns.win_min.top - by,
-            right: btns.win_min.right - bx,
-            bottom: btns.win_min.bottom - by,
-        };
-        let cap_max = RECT {
-            left: btns.win_max.left - bx,
-            top: btns.win_max.top - by,
-            right: btns.win_max.right - bx,
-            bottom: btns.win_max.bottom - by,
-        };
-        let cap_close = RECT {
-            left: btns.win_close.left - bx,
-            top: btns.win_close.top - by,
-            right: btns.win_close.right - bx,
-            bottom: btns.win_close.bottom - by,
-        };
+        let frame_abs = address_bar_frame_rect(layout);
+        if frame_abs.right > frame_abs.left {
+            let local_frame = shift(frame_abs);
+            let local_shield = shift(btns.shield);
+            let local_star = shift(btns.star);
+            paint_url_pill(
+                mem_dc,
+                &local_frame,
+                &local_shield,
+                &local_star,
+                layout.dpi_scale,
+                palette,
+                nav,
+                favicons,
+            );
+        }
+
+        let cap_min = shift(btns.win_min);
+        let cap_max = shift(btns.win_max);
+        let cap_close = shift(btns.win_close);
         draw_caption_button(
             mem_dc,
             &cap_min,
@@ -1220,7 +1226,6 @@ pub fn partition_sidebar_entries<'a>(
 }
 
 struct SidebarGeometry {
-    url_pill: RECT,
     new_btn: RECT,
     new_folder_btn: RECT,
     pinned_tiles: Vec<(usize, TabId, RECT)>,
@@ -1246,16 +1251,7 @@ fn sidebar_geometry(
     let item_h = scale_i32(TAB_ITEM_HEIGHT, scale);
     let gap = scale_i32(3, scale);
 
-    let url_top = rect.top + scale_i32(42, scale);
-    let url_h = scale_i32(36, scale);
-    let url_pill = RECT {
-        left,
-        top: url_top,
-        right,
-        bottom: url_top + url_h,
-    };
-
-    let new_top = url_pill.bottom + scale_i32(8, scale);
+    let new_top = rect.top + scale_i32(TOPBAR_HEIGHT + 7, scale);
     let new_h = scale_i32(32, scale);
     let cta_gap = scale_i32(6, scale);
     let folder_w = scale_i32(76, scale);
@@ -1370,7 +1366,6 @@ fn sidebar_geometry(
     let list_bottom = (dock_top - scale_i32(4, scale)).max(list_top);
 
     SidebarGeometry {
-        url_pill,
         new_btn,
         new_folder_btn,
         pinned_tiles,
@@ -1468,7 +1463,6 @@ pub fn paint_sidebar(
             entries,
             total_tab_count,
             active_url,
-            None,
             live_count,
             max_live,
             hover,
@@ -1504,7 +1498,6 @@ unsafe fn paint_sidebar_to_dc(
     entries: &[SidebarEntry<'_>],
     total_tab_count: usize,
     active_url: &str,
-    addr_text_override: Option<&str>,
     live_count: usize,
     max_live: usize,
     hover: SidebarHit,
@@ -1551,9 +1544,10 @@ unsafe fn paint_sidebar_to_dc(
     let hdr_btns = topbar_button_rects(layout, nav.has_shield_badge());
 
         // Sidebar header row: [K] Kurowser brand on left, nav controls right-aligned inside sidebar
+        let hdr_h = scale_i32(TOPBAR_HEIGHT, scale);
         let logo_sz = scale_i32(18, scale);
         let logo_x = scale_i32(10, scale);
-        let logo_y = scale_i32(9, scale);
+        let logo_y = (hdr_h - logo_sz) / 2;
         favicons.draw_logo(mem_dc, logo_x, logo_y, logo_sz);
 
         let title_left = logo_x + logo_sz + scale_i32(7, scale);
@@ -1564,9 +1558,9 @@ unsafe fn paint_sidebar_to_dc(
             let mut brand = wide("Kurowser");
             let mut brand_rc = RECT {
                 left: title_left,
-                top: scale_i32(5, scale),
+                top: scale_i32(6, scale),
                 right: title_right,
-                bottom: scale_i32(31, scale),
+                bottom: hdr_h - scale_i32(6, scale),
             };
             DrawTextW(
                 mem_dc,
@@ -1657,19 +1651,17 @@ unsafe fn paint_sidebar_to_dc(
             },
         );
 
-        let g = sidebar_geometry(&local, scale, &pinned_tabs);
+        let top_div = RECT {
+            left: scale_i32(10, scale),
+            top: hdr_h - 1,
+            right: width - scale_i32(10, scale),
+            bottom: hdr_h,
+        };
+        let tdiv_br = CreateSolidBrush(rgb(palette.border_subtle));
+        FillRect(mem_dc, &top_div, tdiv_br);
+        let _ = DeleteObject(tdiv_br);
 
-        // Integrated full-width URL / Search Pill inside sidebar
-        paint_url_pill(
-            mem_dc,
-            &g.url_pill,
-            &hdr_btns,
-            scale,
-            palette,
-            nav,
-            favicons,
-            addr_text_override,
-        );
+        let g = sidebar_geometry(&local, scale, &pinned_tabs);
 
         // Split CTA Row: "+ Tab Baru" (primary subtle accent) and "+ Folder" (neutral)
         let new_hover = matches!(hover, SidebarHit::NewTab);
@@ -2390,12 +2382,12 @@ unsafe fn paint_sidebar_to_dc(
 unsafe fn paint_url_pill(
     hdc: HDC,
     frame: &RECT,
-    btns: &TopbarButtons,
+    shield_rc: &RECT,
+    star_rc: &RECT,
     scale: f64,
     palette: &ThemePalette,
     nav: NavVisualState,
     favicons: &FaviconCache,
-    addr_text_override: Option<&str>,
 ) {
     if frame.right <= frame.left {
         return;
@@ -2433,45 +2425,10 @@ unsafe fn paint_url_pill(
     let sec_cy = (frame.top + frame.bottom) / 2;
     draw_security_icon(hdc, sec_cx, sec_cy, scale, nav.sec_icon, palette);
 
-    if let Some(url_str) = addr_text_override {
-        let edit_font = create_font(scale, 14, FW_NORMAL.0 as i32);
-        let prev_f = SelectObject(hdc, edit_font);
-        let is_empty = url_str.trim().is_empty();
-        let prev_col = SetTextColor(
-            hdc,
-            rgb(if is_empty {
-                palette.text_muted
-            } else {
-                palette.text_primary
-            }),
-        );
-        let edit_left = frame.left + scale_i32(25, scale);
-        let edit_right = (btns.shield.left - scale_i32(4, scale)).max(edit_left + 20);
-        let edit_h = scale_i32(22, scale).max(16);
-        let y = frame.top + ((frame.bottom - frame.top - edit_h) / 2);
-        let mut txt = wide(if is_empty { "Cari atau ketik URL…" } else { url_str });
-        let mut rc = RECT {
-            left: edit_left + 1,
-            top: y,
-            right: edit_right,
-            bottom: y + edit_h,
-        };
-        DrawTextW(
-            hdc,
-            &mut txt,
-            &mut rc,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
-        );
-        SetTextColor(hdc, prev_col);
-        SelectObject(hdc, prev_f);
-        let _ = DeleteObject(edit_font);
-    }
-
-    let shield_rc = btns.shield;
     if nav.hover == Some(TopbarButton::Shield) {
         draw_rounded_fill(
             hdc,
-            &shield_rc,
+            shield_rc,
             scale_i32(7, scale),
             rgb(palette.bg_hover),
             rgb(palette.border_subtle),
@@ -2480,7 +2437,7 @@ unsafe fn paint_url_pill(
     let font_badge = create_font(scale, 10, FW_SEMIBOLD.0 as i32);
     draw_shield_button_glyph(
         hdc,
-        &shield_rc,
+        shield_rc,
         scale,
         palette,
         nav.shields_active,
@@ -2491,11 +2448,10 @@ unsafe fn paint_url_pill(
     );
     let _ = DeleteObject(font_badge);
 
-    let star_rc = btns.star;
     if nav.hover == Some(TopbarButton::BookmarkStar) {
         draw_rounded_fill(
             hdc,
-            &star_rc,
+            star_rc,
             scale_i32(7, scale),
             rgb(palette.bg_hover),
             rgb(palette.border_subtle),
@@ -2603,8 +2559,10 @@ unsafe fn draw_caption_button(
 // ── Double-Buffered 50px Slim Collapsed Icon Rail ──
 
 fn rail_list_bounds(rect: &RECT, scale: f64, btns: &TopbarButtons) -> (i32, i32) {
-    let list_top = (btns.rail_search.bottom + scale_i32(12, scale)).max(rect.top);
-    let list_bottom = (btns.shield.top - scale_i32(12, scale)).max(list_top);
+    let hdr_h = scale_i32(TOPBAR_HEIGHT, scale);
+    let list_top = (rect.top + hdr_h + scale_i32(7, scale))
+        .max(btns.toggle.bottom + scale_i32(10, scale));
+    let list_bottom = (btns.rail_settings.top - scale_i32(12, scale)).max(list_top);
     (list_top, list_bottom)
 }
 
@@ -2725,7 +2683,6 @@ pub fn paint_sidebar_transition(
     entries: &[SidebarEntry<'_>],
     total_tab_count: usize,
     active_url: &str,
-    addr_text: &str,
     live_count: usize,
     max_live: usize,
     hover: SidebarHit,
@@ -2826,7 +2783,6 @@ pub fn paint_sidebar_transition(
                 entries,
                 total_tab_count,
                 active_url,
-                Some(addr_text),
                 live_count,
                 max_live,
                 hover,
@@ -2920,25 +2876,8 @@ unsafe fn paint_rail_to_dc(
             },
         );
 
-        // Mini Search Pill trigger (click or Ctrl+L to expand & type URL)
-        let srch_hov = nav.hover == Some(TopbarButton::RailSearch);
-        draw_rounded_fill(
-            mem_dc,
-            &btns.rail_search,
-            scale_i32(8, scale),
-            rgb(if srch_hov { palette.bg_hover } else { palette.bg_surface }),
-            rgb(if srch_hov { palette.accent } else { palette.border }),
-        );
-        draw_search_magnifier(
-            mem_dc,
-            (btns.rail_search.left + btns.rail_search.right) / 2,
-            (btns.rail_search.top + btns.rail_search.bottom) / 2,
-            scale,
-            rgb(if srch_hov { palette.accent_text } else { palette.text_muted }),
-        );
-
-        // Top hairline divider above favicons strip
-        let top_div_y = btns.rail_search.bottom + scale_i32(6, scale);
+        // Top hairline divider aligned with header / topbar bottom
+        let top_div_y = scale_i32(TOPBAR_HEIGHT, scale) - 1;
         let top_div = RECT {
             left: scale_i32(10, scale),
             top: top_div_y,
@@ -3120,38 +3059,15 @@ unsafe fn paint_rail_to_dc(
         let _ = RestoreDC(mem_dc, saved);
         let _ = DeleteObject(font_small);
 
-        // Upper bottom hairline divider above Shields & Settings
+        // Upper bottom hairline divider above Settings
         let bot_div1 = RECT {
             left: scale_i32(10, scale),
-            top: btns.shield.top - scale_i32(6, scale),
+            top: btns.rail_settings.top - scale_i32(6, scale),
             right: width - scale_i32(10, scale),
-            bottom: btns.shield.top - scale_i32(5, scale),
+            bottom: btns.rail_settings.top - scale_i32(5, scale),
         };
         let bdiv_br = CreateSolidBrush(rgb(palette.border_subtle));
         FillRect(mem_dc, &bot_div1, bdiv_br);
-
-        if nav.hover == Some(TopbarButton::Shield) {
-            draw_rounded_fill(
-                mem_dc,
-                &btns.shield,
-                scale_i32(7, scale),
-                rgb(palette.bg_hover),
-                rgb(palette.border_subtle),
-            );
-        }
-        let font_badge = create_font(scale, 10, FW_SEMIBOLD.0 as i32);
-        draw_shield_button_glyph(
-            mem_dc,
-            &btns.shield,
-            scale,
-            palette,
-            nav.shields_active,
-            nav.blocked_count,
-            nav.sec_icon == SecurityIcon::Internal,
-            font_badge,
-            favicons,
-        );
-        let _ = DeleteObject(font_badge);
 
         draw_nav_button(
             mem_dc,
@@ -3765,7 +3681,6 @@ pub struct TopbarButtons {
     pub win_max: RECT,
     pub win_close: RECT,
     pub toggle: RECT,
-    pub rail_search: RECT,
     pub back: RECT,
     pub forward: RECT,
     pub reload: RECT,
@@ -3775,14 +3690,13 @@ pub struct TopbarButtons {
     pub rail_settings: RECT,
 }
 
-pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarButtons {
+fn win_caption_rects(layout: &Layout) -> (RECT, RECT, RECT) {
     let scale = layout.dpi_scale;
-
-    // Window caption buttons (Minimize / Maximize / Close) always anchored at top-right
+    let topbar_h = (layout.topbar.bottom - layout.topbar.top).max(1);
     let win_w = scale_i32(34, scale);
-    let win_h = scale_i32(26, scale);
+    let win_h = scale_i32(28, scale).min((topbar_h - scale_i32(6, scale)).max(16));
     let win_gap = scale_i32(2, scale);
-    let cap_y = scale_i32(5, scale);
+    let cap_y = layout.topbar.top + (topbar_h - win_h) / 2;
     let cap_right = (layout.window.right - scale_i32(8, scale)).max(layout.sidebar.right + 12);
     let win_close = RECT {
         left: cap_right - win_w,
@@ -3802,13 +3716,46 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
         right: win_max.left - win_gap,
         bottom: cap_y + win_h,
     };
+    (win_min, win_max, win_close)
+}
+
+pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarButtons {
+    let scale = layout.dpi_scale;
+    let (win_min, win_max, win_close) = win_caption_rects(layout);
+
+    let frame = address_bar_frame_rect(layout);
+    let (shield, star) = if frame.right > frame.left {
+        let pill_h = (frame.bottom - frame.top).max(1);
+        let star_w = scale_i32(24, scale);
+        let star_h = (pill_h - scale_i32(4, scale)).max(16);
+        let star_y = frame.top + (pill_h - star_h) / 2;
+        let star_r = frame.right - scale_i32(4, scale);
+        let star = RECT {
+            left: star_r - star_w,
+            top: star_y,
+            right: star_r,
+            bottom: star_y + star_h,
+        };
+        let shield_w = scale_i32(if has_shield_badge { 40 } else { 26 }, scale);
+        let shield_r = star.left - scale_i32(2, scale);
+        let shield = RECT {
+            left: shield_r - shield_w,
+            top: star_y,
+            right: shield_r,
+            bottom: star_y + star_h,
+        };
+        (shield, star)
+    } else {
+        (RECT::default(), RECT::default())
+    };
 
     if layout.sidebar_expanded {
         let sb = &layout.sidebar;
         let pad = scale_i32(10, scale);
-        let nav_sz = scale_i32(25, scale);
+        let hdr_h = scale_i32(TOPBAR_HEIGHT, scale);
+        let nav_sz = scale_i32(26, scale).min((hdr_h - scale_i32(6, scale)).max(18));
         let nav_gap = scale_i32(3, scale);
-        let btn_y = sb.top + scale_i32(6, scale);
+        let btn_y = sb.top + (hdr_h - nav_sz) / 2;
         let r_right = sb.right - pad;
 
         let reload = RECT {
@@ -3836,32 +3783,11 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
             bottom: btn_y + nav_sz,
         };
 
-        let url_top = sb.top + scale_i32(42, scale);
-        let url_h = scale_i32(36, scale);
-        let star_w = scale_i32(24, scale);
-        let star_h = scale_i32(26, scale);
-        let star_y = url_top + (url_h - star_h) / 2;
-        let frame_right = sb.right - pad;
-        let star = RECT {
-            left: frame_right - star_w - scale_i32(5, scale),
-            top: star_y,
-            right: frame_right - scale_i32(5, scale),
-            bottom: star_y + star_h,
-        };
-        let shield_w = scale_i32(if has_shield_badge { 40 } else { 26 }, scale);
-        let shield = RECT {
-            left: star.left - shield_w - scale_i32(2, scale),
-            top: star_y,
-            right: star.left - scale_i32(2, scale),
-            bottom: star_y + star_h,
-        };
-
         return TopbarButtons {
             win_min,
             win_max,
             win_close,
             toggle,
-            rail_search: RECT::default(),
             back,
             forward,
             reload,
@@ -3873,29 +3799,27 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
     }
 
     let sb = &layout.sidebar;
+    let hdr_h = scale_i32(TOPBAR_HEIGHT, scale);
     let rail_w = (sb.right - sb.left).max(40);
     let col_w = scale_i32(34, scale).min((rail_w - 6).max(24));
     let col_l = sb.left + (rail_w - col_w) / 2;
     let col_r = col_l + col_w;
+    let tog_h = scale_i32(28, scale).min((hdr_h - scale_i32(6, scale)).max(18));
+    let tog_y = sb.top + (hdr_h - tog_h) / 2;
 
     let toggle = RECT {
         left: col_l,
-        top: sb.top + scale_i32(8, scale),
+        top: tog_y,
         right: col_r,
-        bottom: sb.top + scale_i32(36, scale),
-    };
-    let rail_search = RECT {
-        left: col_l,
-        top: toggle.bottom + scale_i32(5, scale),
-        right: col_r,
-        bottom: toggle.bottom + scale_i32(33, scale),
+        bottom: tog_y + tog_h,
     };
 
-    let btn_h = scale_i32(26, scale);
+    let btn_h = scale_i32(28, scale);
     let nt_h = scale_i32(30, scale);
-    let min_list_top = rail_search.bottom + scale_i32(12, scale);
+    let min_list_top = (sb.top + hdr_h + scale_i32(7, scale))
+        .max(toggle.bottom + scale_i32(10, scale));
     let bottom_edge = (sb.bottom - scale_i32(8, scale)).max(
-        min_list_top + scale_i32(50, scale) + nt_h + btn_h * 2 + scale_i32(27, scale),
+        min_list_top + scale_i32(50, scale) + nt_h + btn_h + scale_i32(23, scale),
     );
 
     let new_tab = RECT {
@@ -3910,42 +3834,47 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
         right: col_r,
         bottom: new_tab.top - scale_i32(11, scale),
     };
-    let shield = RECT {
-        left: col_l,
-        top: rail_settings.top - scale_i32(4, scale) - btn_h,
-        right: col_r,
-        bottom: rail_settings.top - scale_i32(4, scale),
-    };
 
     TopbarButtons {
         win_min,
         win_max,
         win_close,
         toggle,
-        rail_search,
         back: RECT::default(),
         forward: RECT::default(),
         reload: RECT::default(),
         shield,
-        star: RECT::default(),
+        star,
         new_tab,
         rail_settings,
     }
 }
 
 pub fn address_bar_frame_rect(layout: &Layout) -> RECT {
-    if !layout.sidebar_expanded {
+    let scale = layout.dpi_scale;
+    let (win_min, _, _) = win_caption_rects(layout);
+    let avail_left = layout.topbar.left + scale_i32(10, scale);
+    let avail_right = win_min.left - scale_i32(10, scale);
+    let avail_w = avail_right - avail_left;
+    if avail_w < scale_i32(110, scale) {
         return RECT::default();
     }
-    let scale = layout.dpi_scale;
-    let sb = &layout.sidebar;
-    let pad = scale_i32(10, scale);
-    let url_top = sb.top + scale_i32(42, scale);
+    let win_w = (layout.window.right - layout.window.left).max(1);
+    let target_w = scale_i32(500, scale)
+        .min((win_w * 48) / 100)
+        .max(scale_i32(180, scale))
+        .min(avail_w);
+    let ideal_left = layout.window.left + (win_w - target_w) / 2;
+    let max_left = (avail_right - target_w).max(avail_left);
+    let pill_left = ideal_left.clamp(avail_left, max_left);
+    let topbar_h = (layout.topbar.bottom - layout.topbar.top).max(1);
+    let pill_h = scale_i32(30, scale).min((topbar_h - scale_i32(6, scale)).max(20));
+    let pill_top = layout.topbar.top + (topbar_h - pill_h) / 2;
     RECT {
-        left: sb.left + pad,
-        top: url_top,
-        right: (sb.right - pad).max(sb.left + pad + 40),
-        bottom: url_top + scale_i32(36, scale),
+        left: pill_left,
+        top: pill_top,
+        right: pill_left + target_w,
+        bottom: pill_top + pill_h,
     }
 }
 
@@ -3959,8 +3888,6 @@ pub fn hit_test_topbar(layout: &Layout, has_shield_badge: bool, x: i32, y: i32) 
         Some(TopbarButton::WinMinimize)
     } else if point_in_rect(x, y, &btns.toggle) {
         Some(TopbarButton::ToggleSidebar)
-    } else if point_in_rect(x, y, &btns.rail_search) {
-        Some(TopbarButton::RailSearch)
     } else if point_in_rect(x, y, &btns.back) {
         Some(TopbarButton::Back)
     } else if point_in_rect(x, y, &btns.forward) {
@@ -3984,6 +3911,9 @@ pub fn window_drag_area_hit(layout: &Layout, has_shield_badge: bool, x: i32, y: 
     if hit_test_topbar(layout, has_shield_badge, x, y).is_some() {
         return false;
     }
+    if point_in_rect(x, y, &address_bar_frame_rect(layout)) {
+        return false;
+    }
     if point_in_rect(x, y, &layout.content) {
         return false;
     }
@@ -3991,7 +3921,7 @@ pub fn window_drag_area_hit(layout: &Layout, has_shield_badge: bool, x: i32, y: 
         return true;
     }
     if layout.sidebar_expanded {
-        let header_h = scale_i32(42, layout.dpi_scale);
+        let header_h = scale_i32(TOPBAR_HEIGHT, layout.dpi_scale);
         return x >= layout.sidebar.left && x < layout.sidebar.right && y >= 0 && y < header_h;
     }
     let btns = topbar_button_rects(layout, has_shield_badge);
@@ -4151,11 +4081,11 @@ const ADDR_SUBCLASS_ID: usize = 200;
 struct AddrSubclassData {
     on_event: Box<dyn Fn(AddrBarEvent) + 'static>,
     select_all_on_up: bool,
-    mouse_inside: bool,
 }
 
 thread_local! {
     static ADDR_FONT_HANDLE: RefCell<Option<HGDIOBJ>> = const { RefCell::new(None) };
+    static LAST_ADDR_RECT: RefCell<Option<(i32, i32, i32, i32, bool)>> = const { RefCell::new(None) };
 }
 
 pub fn create_address_bar(
@@ -4197,7 +4127,6 @@ pub fn create_address_bar(
         let data = Box::new(AddrSubclassData {
             on_event: Box::new(on_event),
             select_all_on_up: false,
-            mouse_inside: false,
         });
         let raw = Box::into_raw(data) as usize;
         let _ = SetWindowSubclass(hwnd, Some(address_bar_subclass_proc), ADDR_SUBCLASS_ID, raw);
@@ -4231,26 +4160,6 @@ unsafe extern "system" fn address_bar_subclass_proc(
     let data = &mut *(ref_data as *mut AddrSubclassData);
 
     match msg {
-        WM_MOUSEMOVE => {
-            if !data.mouse_inside {
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                if TrackMouseEvent(&mut tme).is_ok() {
-                    data.mouse_inside = true;
-                }
-                (data.on_event)(AddrBarEvent::HoverInside);
-            }
-        }
-
-        WM_MOUSELEAVE => {
-            data.mouse_inside = false;
-            (data.on_event)(AddrBarEvent::HoverLeave);
-        }
-
         WM_LBUTTONDOWN => {
             if GetFocus() != hwnd {
                 data.select_all_on_up = true;
@@ -4413,22 +4322,41 @@ unsafe extern "system" fn address_bar_subclass_proc(
 }
 
 pub fn position_address_bar(addr_hwnd: HWND, layout: &Layout, has_shield_badge: bool) {
-    if !layout.sidebar_expanded || layout.sidebar_ratio < 0.999 {
-        unsafe {
-            if IsWindowVisible(addr_hwnd).as_bool() {
-                let _ = ShowWindow(addr_hwnd, SW_HIDE);
+    let frame = address_bar_frame_rect(layout);
+    if frame.right <= frame.left {
+        let should_hide = LAST_ADDR_RECT.with(|slot| {
+            let mut prev = slot.borrow_mut();
+            let changed = *prev != Some((0, 0, 0, 0, false));
+            *prev = Some((0, 0, 0, 0, false));
+            changed
+        });
+        if should_hide {
+            unsafe {
+                if IsWindowVisible(addr_hwnd).as_bool() {
+                    let _ = ShowWindow(addr_hwnd, SW_HIDE);
+                }
             }
         }
         return;
     }
     let scale = layout.dpi_scale;
-    let frame = address_bar_frame_rect(layout);
     let btns = topbar_button_rects(layout, has_shield_badge);
     let edit_left = frame.left + scale_i32(25, scale);
     let edit_right = (btns.shield.left - scale_i32(4, scale)).max(edit_left + 20);
     let width = (edit_right - edit_left).max(20);
-    let edit_h = scale_i32(22, scale).max(16);
+    let edit_h = scale_i32(20, scale).max(16).min((frame.bottom - frame.top - 4).max(14));
     let y = frame.top + ((frame.bottom - frame.top - edit_h) / 2);
+
+    let next_rect = (edit_left, y, width, edit_h, true);
+    let changed = LAST_ADDR_RECT.with(|slot| {
+        let mut prev = slot.borrow_mut();
+        let diff = *prev != Some(next_rect);
+        *prev = Some(next_rect);
+        diff
+    });
+    if !changed {
+        return;
+    }
 
     unsafe {
         let _ = SetWindowPos(
@@ -4780,17 +4708,20 @@ impl OmniboxPopup {
         }
 
         let frame = address_bar_frame_rect(layout);
+        if frame.right <= frame.left {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            return;
+        }
         let max_win_w = (layout.window.right - layout.window.left - scale_i32(16, scale)).max(200);
-        let width = if layout.sidebar_expanded {
-            scale_i32(440, scale).min(max_win_w)
-        } else {
-            (frame.right - frame.left)
-                .max(scale_i32(340, scale))
-                .min(max_win_w)
-        };
-        let clamped_x = frame
-            .left
-            .min((layout.window.right - width - scale_i32(8, scale)).max(scale_i32(8, scale)));
+        let width = (frame.right - frame.left)
+            .max(scale_i32(340, scale))
+            .min(max_win_w);
+        let pill_center = (frame.left + frame.right) / 2;
+        let ideal_x = pill_center - width / 2;
+        let max_x = (layout.window.right - width - scale_i32(8, scale)).max(scale_i32(8, scale));
+        let clamped_x = ideal_x.clamp(scale_i32(8, scale), max_x);
         let mut pt = POINT {
             x: clamped_x,
             y: frame.bottom + scale_i32(4, scale),
@@ -5265,7 +5196,7 @@ mod tests {
                 ];
                 for i in 0..row1.len() {
                     assert!(row1[i].right > row1[i].left);
-                    assert!(row1[i].bottom <= scale_i32(42, scale));
+                    assert!(row1[i].bottom <= layout.topbar.bottom);
                     for j in (i + 1)..row1.len() {
                         assert!(!rects_overlap(&row1[i], &row1[j]));
                     }
@@ -5276,7 +5207,9 @@ mod tests {
                 assert!(b.win_close.right <= layout.window.right);
                 assert!(b.win_close.bottom <= layout.content.top);
                 let frame = address_bar_frame_rect(&layout);
-                assert!(b.shield.left >= frame.left + scale_i32(60, scale));
+                assert!(frame.left >= layout.topbar.left + scale_i32(8, scale));
+                assert!(frame.right <= b.win_min.left - scale_i32(8, scale));
+                assert!(b.shield.left >= frame.left + scale_i32(48, scale));
                 assert!(b.shield.right <= b.star.left);
                 assert!(b.star.right <= frame.right);
             }
@@ -5284,16 +5217,24 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_rail_is_50px_with_top_right_captions_and_clean_tiles() {
+    fn collapsed_rail_is_50px_with_top_right_captions_and_centered_search() {
         for &(w, h, scale) in &[(1180, 760, 1.0), (560, 380, 1.0), (1475, 950, 1.25)] {
             let layout = Layout::compute_with_metrics(w, h, scale, false, false);
             let expected_rail = scale_i32(COLLAPSED_RAIL_WIDTH, scale);
             assert_eq!(layout.topbar.bottom, scale_i32(TOPBAR_HEIGHT, scale));
             assert_eq!(layout.sidebar.right, expected_rail);
             assert_eq!(layout.content.left, expected_rail + scale_i32(FRAME_PAD, scale));
-            assert!(address_bar_frame_rect(&layout).right == 0);
+
+            let frame = address_bar_frame_rect(&layout);
+            assert!(frame.right > frame.left);
+            assert!(frame.left >= layout.topbar.left + scale_i32(8, scale));
 
             let b = topbar_button_rects(&layout, true);
+            assert!(frame.right <= b.win_min.left - scale_i32(8, scale));
+            assert!(b.shield.left >= frame.left + scale_i32(48, scale));
+            assert!(b.shield.right <= b.star.left);
+            assert!(b.star.right <= frame.right);
+
             for cap in [b.win_min, b.win_max, b.win_close] {
                 assert!(cap.left >= expected_rail);
                 assert!(cap.right <= layout.window.right);
@@ -5302,14 +5243,7 @@ mod tests {
             assert_eq!(b.back.right, 0);
             assert_eq!(b.forward.right, 0);
             assert_eq!(b.reload.right, 0);
-            assert_eq!(b.star.right, 0);
-            let rail_btns = [
-                b.toggle,
-                b.rail_search,
-                b.shield,
-                b.rail_settings,
-                b.new_tab,
-            ];
+            let rail_btns = [b.toggle, b.rail_settings, b.new_tab];
             for i in 0..rail_btns.len() {
                 assert!(rail_btns[i].left >= 0 && rail_btns[i].right <= expected_rail);
                 assert!(rail_btns[i].top >= 0 && rail_btns[i].bottom <= h);
@@ -5320,16 +5254,37 @@ mod tests {
             let (ltop, lbot) = rail_list_bounds(&layout.sidebar, scale, &b);
             assert!(lbot > ltop + scale_i32(80, scale));
         }
+
+        // At default 1180px width, centered search pill stays stationary across rail <-> expanded hover
+        let rail = Layout::compute_with_metrics(1180, 760, 1.0, false, false);
+        let exp = Layout::compute_with_metrics(1180, 760, 1.0, false, true);
+        let rf = address_bar_frame_rect(&rail);
+        let ef = address_bar_frame_rect(&exp);
+        assert_eq!((rf.left, rf.right), (ef.left, ef.right));
+        assert_eq!((rf.left + rf.right) / 2, 590);
     }
 
     #[test]
-    fn drag_zones_exclude_buttons_and_content() {
+    fn drag_zones_exclude_buttons_search_and_content() {
         let layout = Layout::compute_with_metrics(1180, 760, 1.0, false, true);
         let b = topbar_button_rects(&layout, false);
+        let frame = address_bar_frame_rect(&layout);
         assert!(window_drag_area_hit(
             &layout,
             false,
-            (layout.topbar.left + b.win_min.left) / 2,
+            (layout.topbar.left + frame.left) / 2,
+            16
+        ));
+        assert!(window_drag_area_hit(
+            &layout,
+            false,
+            (frame.right + b.win_min.left) / 2,
+            16
+        ));
+        assert!(!window_drag_area_hit(
+            &layout,
+            false,
+            (frame.left + frame.right) / 2,
             16
         ));
         assert!(window_drag_area_hit(&layout, false, (40 + b.toggle.left) / 2, 18));
@@ -5402,6 +5357,12 @@ mod tests {
                     assert!(cap.right <= layout.window.right);
                     assert!(cap.bottom <= layout.content.top);
                 }
+                let frame = address_bar_frame_rect(&layout);
+                assert!(frame.left >= layout.topbar.left + scale_i32(8, scale));
+                assert!(frame.right <= b.win_min.left - scale_i32(8, scale));
+                assert!(b.shield.left >= frame.left + scale_i32(48, scale));
+                assert!(b.shield.right <= b.star.left);
+                assert!(b.star.right <= frame.right);
             }
         }
     }
