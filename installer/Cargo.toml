@@ -1,6 +1,6 @@
 [package]
 name = "kurowser-setup"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 description = "Native Windows installer and uninstaller for Kurowser"
 license = "MIT"

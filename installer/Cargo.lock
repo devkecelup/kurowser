@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "kurowser-setup"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "png",
  "windows",

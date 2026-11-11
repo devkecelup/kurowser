@@ -1783,7 +1783,7 @@ function renderUpdateUi() {
   const applyBtn = document.getElementById('btn-apply-update');
 
   const modeLabel = updateState.installed ? 'Terinstal' : 'Portabel';
-  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.1') + ' (' + modeLabel + ')';
+  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.2') + ' (' + modeLabel + ')';
 
   const st = updateState.status || 'idle';
   applyBtn.style.display = st === 'ready' ? '' : 'none';

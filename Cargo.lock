@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "kurowser"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "png",
  "serde",

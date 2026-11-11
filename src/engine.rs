@@ -1,5 +1,5 @@
 // ─── engine.rs ─── Native WebView2 engine: kurowser:// custom scheme, Security & Shields ───
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -55,9 +55,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::SHCreateMemStream;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, SetWindowPos, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, HCURSOR, HICON, HMENU, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE,
-    WINDOW_EX_STYLE,
+    CS_HREDRAW, CS_VREDRAW, HCURSOR, HICON, HMENU, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE, WINDOW_EX_STYLE,
 };
 
 use crate::adblock::{self, normalize_host};
@@ -163,6 +162,7 @@ pub struct KurowserWebView {
     webview: ICoreWebView2,
     expected_internal_nav: Rc<RefCell<Option<String>>>,
     shields_script_id: Rc<RefCell<Option<String>>>,
+    last_bounds: Cell<PixelRect>,
 }
 
 impl Drop for KurowserWebView {
@@ -186,8 +186,16 @@ impl KurowserWebView {
     }
 
     pub fn set_bounds(&self, bounds: PixelRect) {
+        let prev = self.last_bounds.get();
+        if prev == bounds {
+            return;
+        }
         let w = bounds.width.max(1);
         let h = bounds.height.max(1);
+        let rgn_changed = prev.width.max(1) != w
+            || prev.height.max(1) != h
+            || prev.corner_diameter != bounds.corner_diameter;
+        self.last_bounds.set(bounds);
         unsafe {
             let _ = self.controller.SetBounds(RECT {
                 left: 0,
@@ -195,6 +203,9 @@ impl KurowserWebView {
                 right: w,
                 bottom: h,
             });
+            if rgn_changed {
+                apply_container_region(self.hwnd, w, h, bounds.corner_diameter, false);
+            }
             let _ = SetWindowPos(
                 self.hwnd,
                 HWND::default(),
@@ -202,9 +213,8 @@ impl KurowserWebView {
                 bounds.y,
                 w,
                 h,
-                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+                SWP_NOACTIVATE | SWP_NOZORDER,
             );
-            apply_container_region(self.hwnd, w, h, bounds.corner_diameter);
         }
     }
 
@@ -447,20 +457,27 @@ fn create_container_hwnd(parent: HWND, bounds: PixelRect) -> Result<HWND, String
     };
 
     unsafe {
-        apply_container_region(hwnd, bounds.width.max(1), bounds.height.max(1), bounds.corner_diameter);
+        apply_container_region(
+            hwnd,
+            bounds.width.max(1),
+            bounds.height.max(1),
+            bounds.corner_diameter,
+            true,
+        );
     }
 
     Ok(hwnd)
 }
 
-unsafe fn apply_container_region(hwnd: HWND, w: i32, h: i32, corner_diameter: i32) {
+unsafe fn apply_container_region(hwnd: HWND, w: i32, h: i32, corner_diameter: i32, redraw: bool) {
+    let redraw_flag = BOOL(i32::from(redraw));
     if corner_diameter > 2 {
         let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner_diameter, corner_diameter);
         if !rgn.is_invalid() {
-            let _ = SetWindowRgn(hwnd, rgn, BOOL(1));
+            let _ = SetWindowRgn(hwnd, rgn, redraw_flag);
         }
     } else {
-        let _ = SetWindowRgn(hwnd, None, BOOL(1));
+        let _ = SetWindowRgn(hwnd, None, redraw_flag);
     }
 }
 
@@ -1033,6 +1050,7 @@ pub fn create_webview(
         webview,
         expected_internal_nav,
         shields_script_id,
+        last_bounds: Cell::new(PixelRect::default()),
     };
 
     kwv.set_bounds(bounds);

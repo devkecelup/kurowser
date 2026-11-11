@@ -906,7 +906,71 @@ unsafe fn draw_dib_alpha(hdc_dest: HDC, dib: &DibBitmap, x: i32, y: i32, w: i32,
     let _ = DeleteDC(src_dc);
 }
 
-// ── Layout Computation ──
+// ── Layout & Motion Helpers ──
+
+pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let span = edge1 - edge0;
+    if span.abs() < 1e-9 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / span).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+pub fn ease_sidebar_cubic(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    const X1: f64 = 0.22;
+    const X2: f64 = 0.36;
+    let mut lo = 0.0_f64;
+    let mut hi = 1.0_f64;
+    let mut u = t;
+    for _ in 0..8 {
+        let inv = 1.0 - u;
+        let x = 3.0 * inv * inv * u * X1 + 3.0 * inv * u * u * X2 + u * u * u;
+        let err = x - t;
+        if err.abs() < 1e-7 {
+            break;
+        }
+        if err < 0.0 {
+            lo = u;
+        } else {
+            hi = u;
+        }
+        let dx =
+            3.0 * inv * inv * X1 + 6.0 * inv * u * (X2 - X1) + 3.0 * u * u * (1.0 - X2);
+        let next = if dx.abs() > 1e-6 {
+            u - err / dx
+        } else {
+            0.5 * (lo + hi)
+        };
+        u = if next > lo && next < hi {
+            next
+        } else {
+            0.5 * (lo + hi)
+        };
+    }
+    let inv = 1.0 - u;
+    (1.0 - inv * inv * inv).clamp(0.0, 1.0)
+}
+
+pub fn client_area_animations_enabled() -> bool {
+    let mut enabled = BOOL(1);
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some(&mut enabled as *mut BOOL as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    }
+    enabled.as_bool()
+}
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -915,27 +979,35 @@ pub struct Layout {
     pub topbar: RECT,
     pub content: RECT,
     pub sidebar_expanded: bool,
+    pub sidebar_ratio: f64,
     pub is_maximized: bool,
     pub dpi_scale: f64,
 }
 
 impl Layout {
-    pub fn compute_with_metrics(
+    pub fn compute_with_ratio(
         w: i32,
         h: i32,
         scale: f64,
         is_maximized: bool,
-        sidebar_expanded: bool,
+        sidebar_ratio: f64,
     ) -> Self {
         let w = w.max(1);
         let h = h.max(1);
         let scale = if scale > 0.0 { scale } else { 1.0 };
+        let ratio = sidebar_ratio.clamp(0.0, 1.0);
 
-        let sb_w = if sidebar_expanded {
-            scale_i32(SIDEBAR_WIDTH, scale).min((w * 49) / 100)
+        let full_w = scale_i32(SIDEBAR_WIDTH, scale).min((w * 49) / 100);
+        let rail_w = scale_i32(COLLAPSED_RAIL_WIDTH, scale).min((w * 35) / 100);
+        let sb_w = if ratio >= 0.999 {
+            full_w
+        } else if ratio <= 0.001 {
+            rail_w
         } else {
-            scale_i32(COLLAPSED_RAIL_WIDTH, scale).min((w * 35) / 100)
+            (rail_w as f64 + (full_w - rail_w) as f64 * ratio).round() as i32
         };
+        let sidebar_expanded = ratio >= 0.999;
+
         let tb_h = if h > scale_i32(120, scale) {
             scale_i32(TOPBAR_HEIGHT, scale)
         } else {
@@ -972,12 +1044,30 @@ impl Layout {
                 bottom: (h - pad_bot).max(tb_h + 1),
             },
             sidebar_expanded,
+            sidebar_ratio: ratio,
             is_maximized,
             dpi_scale: scale,
         }
     }
 
-    pub fn compute(hwnd: HWND, sidebar_expanded: bool) -> Self {
+    #[cfg(test)]
+    pub fn compute_with_metrics(
+        w: i32,
+        h: i32,
+        scale: f64,
+        is_maximized: bool,
+        sidebar_expanded: bool,
+    ) -> Self {
+        Self::compute_with_ratio(
+            w,
+            h,
+            scale,
+            is_maximized,
+            if sidebar_expanded { 1.0 } else { 0.0 },
+        )
+    }
+
+    pub fn compute_ratio(hwnd: HWND, sidebar_ratio: f64) -> Self {
         let mut rc = RECT::default();
         let is_maximized = unsafe {
             let _ = GetClientRect(hwnd, &mut rc);
@@ -989,7 +1079,7 @@ impl Layout {
         let dpi = unsafe { GetDpiForWindow(hwnd) } as f64;
         let scale = if dpi > 0.0 { dpi / 96.0 } else { 1.0 };
 
-        Self::compute_with_metrics(w, h, scale, is_maximized, sidebar_expanded)
+        Self::compute_with_ratio(w, h, scale, is_maximized, sidebar_ratio)
     }
 
     pub fn content_bounds(&self) -> PixelRect {
@@ -1359,6 +1449,71 @@ pub fn paint_sidebar(
     favicons: &FaviconCache,
 ) {
     let rect = &layout.sidebar;
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    unsafe {
+        let mem_dc = CreateCompatibleDC(hdc_screen);
+        let mem_bmp = CreateCompatibleBitmap(hdc_screen, width, height);
+        let old_bmp = SelectObject(mem_dc, mem_bmp);
+
+        paint_sidebar_to_dc(
+            mem_dc,
+            layout,
+            palette,
+            nav,
+            entries,
+            total_tab_count,
+            active_url,
+            None,
+            live_count,
+            max_live,
+            hover,
+            scroll_offset,
+            renaming_folder,
+            drag_target,
+            favicons,
+        );
+
+        let _ = BitBlt(
+            hdc_screen,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            mem_dc,
+            0,
+            0,
+            SRCCOPY,
+        );
+
+        SelectObject(mem_dc, old_bmp);
+        let _ = DeleteObject(mem_bmp);
+        let _ = DeleteDC(mem_dc);
+    }
+}
+
+unsafe fn paint_sidebar_to_dc(
+    mem_dc: HDC,
+    layout: &Layout,
+    palette: &ThemePalette,
+    nav: NavVisualState,
+    entries: &[SidebarEntry<'_>],
+    total_tab_count: usize,
+    active_url: &str,
+    addr_text_override: Option<&str>,
+    live_count: usize,
+    max_live: usize,
+    hover: SidebarHit,
+    scroll_offset: i32,
+    renaming_folder: Option<FolderId>,
+    drag_target: Option<DragDropTarget>,
+    favicons: &FaviconCache,
+) {
+    let rect = &layout.sidebar;
     let scale = layout.dpi_scale;
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
@@ -1368,37 +1523,32 @@ pub fn paint_sidebar(
 
     let (pinned_tabs, tree_entries) = partition_sidebar_entries(entries);
 
-    unsafe {
-        let mem_dc = CreateCompatibleDC(hdc_screen);
-        let mem_bmp = CreateCompatibleBitmap(hdc_screen, width, height);
-        let old_bmp = SelectObject(mem_dc, mem_bmp);
+    let local = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
 
-        let local = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        };
+    let bg_brush = CreateSolidBrush(rgb(palette.bg_chrome));
+    FillRect(mem_dc, &local, bg_brush);
+    let _ = DeleteObject(bg_brush);
 
-        let bg_brush = CreateSolidBrush(rgb(palette.bg_chrome));
-        FillRect(mem_dc, &local, bg_brush);
-        let _ = DeleteObject(bg_brush);
+    SetBkMode(mem_dc, TRANSPARENT);
 
-        SetBkMode(mem_dc, TRANSPARENT);
+    let font_title = create_font(
+        scale,
+        if width < scale_i32(252, scale) { 13 } else { 15 },
+        FW_SEMIBOLD.0 as i32,
+    );
+    let font_tab = create_font(scale, 13, FW_NORMAL.0 as i32);
+    let font_tab_active = create_font(scale, 13, FW_MEDIUM.0 as i32);
+    let font_dock = create_font(scale, 12, FW_MEDIUM.0 as i32);
+    let font_small = create_font(scale, 10, FW_MEDIUM.0 as i32);
+    let font_meta = create_font(scale, 11, FW_MEDIUM.0 as i32);
+    let old_font = SelectObject(mem_dc, font_title);
 
-        let font_title = create_font(
-            scale,
-            if width < scale_i32(252, scale) { 13 } else { 15 },
-            FW_SEMIBOLD.0 as i32,
-        );
-        let font_tab = create_font(scale, 13, FW_NORMAL.0 as i32);
-        let font_tab_active = create_font(scale, 13, FW_MEDIUM.0 as i32);
-        let font_dock = create_font(scale, 12, FW_MEDIUM.0 as i32);
-        let font_small = create_font(scale, 10, FW_MEDIUM.0 as i32);
-        let font_meta = create_font(scale, 11, FW_MEDIUM.0 as i32);
-        let old_font = SelectObject(mem_dc, font_title);
-
-        let hdr_btns = topbar_button_rects(layout, nav.has_shield_badge());
+    let hdr_btns = topbar_button_rects(layout, nav.has_shield_badge());
 
         // Sidebar header row: [K] Kurowser brand on left, nav controls right-aligned inside sidebar
         let logo_sz = scale_i32(18, scale);
@@ -1510,7 +1660,16 @@ pub fn paint_sidebar(
         let g = sidebar_geometry(&local, scale, &pinned_tabs);
 
         // Integrated full-width URL / Search Pill inside sidebar
-        paint_url_pill(mem_dc, &g.url_pill, &hdr_btns, scale, palette, nav, favicons);
+        paint_url_pill(
+            mem_dc,
+            &g.url_pill,
+            &hdr_btns,
+            scale,
+            palette,
+            nav,
+            favicons,
+            addr_text_override,
+        );
 
         // Split CTA Row: "+ Tab Baru" (primary subtle accent) and "+ Folder" (neutral)
         let new_hover = matches!(hover, SidebarHit::NewTab);
@@ -2219,29 +2378,13 @@ pub fn paint_sidebar(
             DT_CENTER | DT_SINGLELINE | DT_VCENTER,
         );
 
-        let _ = BitBlt(
-            hdc_screen,
-            rect.left,
-            rect.top,
-            width,
-            height,
-            mem_dc,
-            0,
-            0,
-            SRCCOPY,
-        );
-
         SelectObject(mem_dc, old_font);
-        SelectObject(mem_dc, old_bmp);
         let _ = DeleteObject(font_title);
         let _ = DeleteObject(font_tab);
         let _ = DeleteObject(font_tab_active);
         let _ = DeleteObject(font_dock);
         let _ = DeleteObject(font_small);
         let _ = DeleteObject(font_meta);
-        let _ = DeleteObject(mem_bmp);
-        let _ = DeleteDC(mem_dc);
-    }
 }
 
 unsafe fn paint_url_pill(
@@ -2252,6 +2395,7 @@ unsafe fn paint_url_pill(
     palette: &ThemePalette,
     nav: NavVisualState,
     favicons: &FaviconCache,
+    addr_text_override: Option<&str>,
 ) {
     if frame.right <= frame.left {
         return;
@@ -2288,6 +2432,40 @@ unsafe fn paint_url_pill(
     let sec_cx = frame.left + scale_i32(14, scale);
     let sec_cy = (frame.top + frame.bottom) / 2;
     draw_security_icon(hdc, sec_cx, sec_cy, scale, nav.sec_icon, palette);
+
+    if let Some(url_str) = addr_text_override {
+        let edit_font = create_font(scale, 14, FW_NORMAL.0 as i32);
+        let prev_f = SelectObject(hdc, edit_font);
+        let is_empty = url_str.trim().is_empty();
+        let prev_col = SetTextColor(
+            hdc,
+            rgb(if is_empty {
+                palette.text_muted
+            } else {
+                palette.text_primary
+            }),
+        );
+        let edit_left = frame.left + scale_i32(25, scale);
+        let edit_right = (btns.shield.left - scale_i32(4, scale)).max(edit_left + 20);
+        let edit_h = scale_i32(22, scale).max(16);
+        let y = frame.top + ((frame.bottom - frame.top - edit_h) / 2);
+        let mut txt = wide(if is_empty { "Cari atau ketik URL…" } else { url_str });
+        let mut rc = RECT {
+            left: edit_left + 1,
+            top: y,
+            right: edit_right,
+            bottom: y + edit_h,
+        };
+        DrawTextW(
+            hdc,
+            &mut txt,
+            &mut rc,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+        SetTextColor(hdc, prev_col);
+        SelectObject(hdc, prev_f);
+        let _ = DeleteObject(edit_font);
+    }
 
     let shield_rc = btns.shield;
     if nav.hover == Some(TopbarButton::Shield) {
@@ -2508,7 +2686,6 @@ pub fn paint_rail(
         return;
     }
     let rect = &layout.sidebar;
-    let scale = layout.dpi_scale;
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
     if width <= 0 || height <= 0 {
@@ -2520,18 +2697,211 @@ pub fn paint_rail(
         let mem_bmp = CreateCompatibleBitmap(hdc_screen, width, height);
         let old_bmp = SelectObject(mem_dc, mem_bmp);
 
-        let local = RECT {
+        paint_rail_to_dc(mem_dc, layout, palette, nav, entries, scroll_offset, hover, favicons);
+
+        let _ = BitBlt(
+            hdc_screen,
+            rect.left,
+            rect.top,
+            width,
+            height,
+            mem_dc,
+            0,
+            0,
+            SRCCOPY,
+        );
+
+        SelectObject(mem_dc, old_bmp);
+        let _ = DeleteObject(mem_bmp);
+        let _ = DeleteDC(mem_dc);
+    }
+}
+
+pub fn paint_sidebar_transition(
+    hdc_screen: HDC,
+    layout: &Layout,
+    palette: &ThemePalette,
+    nav: NavVisualState,
+    entries: &[SidebarEntry<'_>],
+    total_tab_count: usize,
+    active_url: &str,
+    addr_text: &str,
+    live_count: usize,
+    max_live: usize,
+    hover: SidebarHit,
+    scroll_offset: i32,
+    drag_target: Option<DragDropTarget>,
+    favicons: &FaviconCache,
+) {
+    let rect = &layout.sidebar;
+    let cur_w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if cur_w <= 0 || h <= 0 {
+        return;
+    }
+
+    let scale = layout.dpi_scale;
+    let ratio = layout.sidebar_ratio.clamp(0.0, 1.0);
+    let rail_layout = Layout::compute_with_ratio(
+        layout.window.right,
+        layout.window.bottom,
+        scale,
+        layout.is_maximized,
+        0.0,
+    );
+    let full_layout = Layout::compute_with_ratio(
+        layout.window.right,
+        layout.window.bottom,
+        scale,
+        layout.is_maximized,
+        1.0,
+    );
+    let rail_w = (rail_layout.sidebar.right - rail_layout.sidebar.left).max(1);
+    let full_w = (full_layout.sidebar.right - full_layout.sidebar.left).max(1);
+
+    let rail_alpha = ((1.0 - smoothstep(0.0, 0.48, ratio)) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    let exp_alpha = (smoothstep(0.10, 0.90, ratio) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+
+    unsafe {
+        let frame_dc = CreateCompatibleDC(hdc_screen);
+        let frame_bmp = CreateCompatibleBitmap(hdc_screen, cur_w, h);
+        let old_frame = SelectObject(frame_dc, frame_bmp);
+
+        let frame_local = RECT {
             left: 0,
             top: 0,
-            right: width,
-            bottom: height,
+            right: cur_w,
+            bottom: h,
         };
+        let bg_br = CreateSolidBrush(rgb(palette.bg_chrome));
+        FillRect(frame_dc, &frame_local, bg_br);
+        let _ = DeleteObject(bg_br);
 
-        let bg_brush = CreateSolidBrush(rgb(palette.bg_chrome));
-        FillRect(mem_dc, &local, bg_brush);
-        let _ = DeleteObject(bg_brush);
+        if rail_alpha > 0 {
+            let rail_dc = CreateCompatibleDC(hdc_screen);
+            let rail_bmp = CreateCompatibleBitmap(hdc_screen, rail_w, h);
+            let old_rail = SelectObject(rail_dc, rail_bmp);
 
-        let btns = topbar_button_rects(layout, nav.has_shield_badge());
+            paint_rail_to_dc(
+                rail_dc,
+                &rail_layout,
+                palette,
+                nav,
+                entries,
+                scroll_offset,
+                hover,
+                favicons,
+            );
+
+            let copy_w = cur_w.min(rail_w);
+            if copy_w > 0 {
+                let bf = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: rail_alpha,
+                    AlphaFormat: 0,
+                };
+                let _ = AlphaBlend(frame_dc, 0, 0, copy_w, h, rail_dc, 0, 0, copy_w, h, bf);
+            }
+
+            SelectObject(rail_dc, old_rail);
+            let _ = DeleteObject(rail_bmp);
+            let _ = DeleteDC(rail_dc);
+        }
+
+        if exp_alpha > 0 {
+            let exp_dc = CreateCompatibleDC(hdc_screen);
+            let exp_bmp = CreateCompatibleBitmap(hdc_screen, full_w, h);
+            let old_exp = SelectObject(exp_dc, exp_bmp);
+
+            paint_sidebar_to_dc(
+                exp_dc,
+                &full_layout,
+                palette,
+                nav,
+                entries,
+                total_tab_count,
+                active_url,
+                Some(addr_text),
+                live_count,
+                max_live,
+                hover,
+                scroll_offset,
+                None,
+                drag_target,
+                favicons,
+            );
+
+            let slide_left = ((1.0 - ratio) * scale_i32(8, scale) as f64).round() as i32;
+            let src_x = slide_left.clamp(0, (full_w - 1).max(0));
+            let copy_w = cur_w.min(full_w - src_x);
+            if copy_w > 0 {
+                let bf = BLENDFUNCTION {
+                    BlendOp: AC_SRC_OVER as u8,
+                    BlendFlags: 0,
+                    SourceConstantAlpha: exp_alpha,
+                    AlphaFormat: 0,
+                };
+                let _ = AlphaBlend(frame_dc, 0, 0, copy_w, h, exp_dc, src_x, 0, copy_w, h, bf);
+            }
+
+            SelectObject(exp_dc, old_exp);
+            let _ = DeleteObject(exp_bmp);
+            let _ = DeleteDC(exp_dc);
+        }
+
+        let _ = BitBlt(
+            hdc_screen,
+            rect.left,
+            rect.top,
+            cur_w,
+            h,
+            frame_dc,
+            0,
+            0,
+            SRCCOPY,
+        );
+
+        SelectObject(frame_dc, old_frame);
+        let _ = DeleteObject(frame_bmp);
+        let _ = DeleteDC(frame_dc);
+    }
+}
+
+unsafe fn paint_rail_to_dc(
+    mem_dc: HDC,
+    layout: &Layout,
+    palette: &ThemePalette,
+    nav: NavVisualState,
+    entries: &[SidebarEntry<'_>],
+    scroll_offset: i32,
+    hover: SidebarHit,
+    favicons: &FaviconCache,
+) {
+    let rect = &layout.sidebar;
+    let scale = layout.dpi_scale;
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let local = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+
+    let bg_brush = CreateSolidBrush(rgb(palette.bg_chrome));
+    FillRect(mem_dc, &local, bg_brush);
+    let _ = DeleteObject(bg_brush);
+
+    let btns = topbar_button_rects(layout, nav.has_shield_badge());
 
         draw_nav_button(
             mem_dc,
@@ -2823,40 +3193,23 @@ pub fn paint_rail(
         FillRect(mem_dc, &bot_div2, bdiv_br);
         let _ = DeleteObject(bdiv_br);
 
-        let nt_hov = nav.hover == Some(TopbarButton::NewTab);
-        draw_nav_button(
-            mem_dc,
-            &btns.new_tab,
-            scale,
-            palette,
-            true,
-            nt_hov,
-            |dc, cx, cy| {
-                let col = if nt_hov {
-                    palette.accent_text
-                } else {
-                    palette.text_primary
-                };
-                draw_plus_icon(dc, cx, cy, scale_i32(5, scale), rgb(col), scale);
-            },
-        );
-
-        let _ = BitBlt(
-            hdc_screen,
-            rect.left,
-            rect.top,
-            width,
-            height,
-            mem_dc,
-            0,
-            0,
-            SRCCOPY,
-        );
-
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(mem_bmp);
-        let _ = DeleteDC(mem_dc);
-    }
+    let nt_hov = nav.hover == Some(TopbarButton::NewTab);
+    draw_nav_button(
+        mem_dc,
+        &btns.new_tab,
+        scale,
+        palette,
+        true,
+        nt_hov,
+        |dc, cx, cy| {
+            let col = if nt_hov {
+                palette.accent_text
+            } else {
+                palette.text_primary
+            };
+            draw_plus_icon(dc, cx, cy, scale_i32(5, scale), rgb(col), scale);
+        },
+    );
 }
 
 unsafe fn draw_nav_button(
@@ -4060,9 +4413,11 @@ unsafe extern "system" fn address_bar_subclass_proc(
 }
 
 pub fn position_address_bar(addr_hwnd: HWND, layout: &Layout, has_shield_badge: bool) {
-    if !layout.sidebar_expanded {
+    if !layout.sidebar_expanded || layout.sidebar_ratio < 0.999 {
         unsafe {
-            let _ = ShowWindow(addr_hwnd, SW_HIDE);
+            if IsWindowVisible(addr_hwnd).as_bool() {
+                let _ = ShowWindow(addr_hwnd, SW_HIDE);
+            }
         }
         return;
     }
@@ -5002,6 +5357,52 @@ mod tests {
                 }
             }
             assert!(non_zero_alpha > 40);
+        }
+    }
+
+    #[test]
+    fn ease_and_smoothstep_curves_are_monotonic_within_bounds() {
+        assert_eq!(ease_sidebar_cubic(-0.5), 0.0);
+        assert_eq!(ease_sidebar_cubic(0.0), 0.0);
+        assert_eq!(ease_sidebar_cubic(1.0), 1.0);
+        assert_eq!(ease_sidebar_cubic(1.5), 1.0);
+        assert!(ease_sidebar_cubic(0.25) > 0.5);
+
+        let mut prev_e = -1.0;
+        let mut prev_s = -1.0;
+        for step in 0..=20 {
+            let t = step as f64 / 20.0;
+            let e = ease_sidebar_cubic(t);
+            let s = smoothstep(0.1, 0.9, t);
+            assert!(e >= prev_e && (0.0..=1.0).contains(&e));
+            assert!(s >= prev_s && (0.0..=1.0).contains(&s));
+            prev_e = e;
+            prev_s = s;
+        }
+        assert_eq!(smoothstep(0.5, 0.5, 0.4), 0.0);
+        assert_eq!(smoothstep(0.5, 0.5, 0.6), 1.0);
+    }
+
+    #[test]
+    fn ratio_layout_interpolates_smoothly_without_overlap() {
+        for &(w, h, scale) in &[(1180, 760, 1.0), (560, 380, 1.0), (1475, 950, 1.25)] {
+            let pad = scale_i32(FRAME_PAD, scale);
+            let mut prev_sb_r = -1;
+            for &ratio in &[0.0, 0.2, 0.5, 0.85, 0.998, 1.0] {
+                let layout = Layout::compute_with_ratio(w, h, scale, false, ratio);
+                assert!(layout.sidebar.right >= prev_sb_r);
+                prev_sb_r = layout.sidebar.right;
+                assert_eq!(layout.topbar.left, layout.sidebar.right);
+                assert_eq!(layout.content.left, layout.sidebar.right + pad);
+                assert_eq!(layout.sidebar_expanded, ratio >= 0.999);
+
+                let b = topbar_button_rects(&layout, true);
+                for cap in [b.win_min, b.win_max, b.win_close] {
+                    assert!(cap.left >= layout.sidebar.right);
+                    assert!(cap.right <= layout.window.right);
+                    assert!(cap.bottom <= layout.content.top);
+                }
+            }
         }
     }
 }
