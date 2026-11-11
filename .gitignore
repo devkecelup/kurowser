@@ -1,5 +1,5 @@
 # Build artifacts & compiled binaries
-/target/
+target/
 *.exe
 *.pdb
 *.log
@@ -12,3 +12,4 @@
 
 # User runtime profile (never commit browser data)
 WebView2Data/
+

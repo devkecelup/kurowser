@@ -2,7 +2,7 @@
 name = "kurowser"
 version = "1.0.0"
 edition = "2021"
-description = "Ultra-lightweight native Win32 + WebView2 browser with Zen/Arc Tab Folders and Brave-style Shields"
+description = "Ultra-lightweight native Windows browser in Rust + Win32 + WebView2 with Tab Folders and Kurowser Shields"
 license = "MIT"
 
 [dependencies]
