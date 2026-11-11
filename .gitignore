@@ -1,0 +1,14 @@
+# Build artifacts & compiled binaries
+/target/
+*.exe
+*.pdb
+*.log
+*.tmp
+
+# Local editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# User runtime profile (never commit browser data)
+WebView2Data/
