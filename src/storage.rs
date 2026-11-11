@@ -6,12 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
 pub const FOLDER_PALETTE: &[(&str, &str)] = &[
-    ("Indigo", "#818cf8"),
+    ("Teal", "#14b8a6"),
     ("Sky", "#38bdf8"),
-    ("Emerald", "#34d399"),
-    ("Amber", "#fbbf24"),
-    ("Sakura", "#f472b6"),
-    ("Rose", "#fb7185"),
+    ("Emerald", "#10b981"),
+    ("Amber", "#f59e0b"),
+    ("Slate", "#64748b"),
+    ("Rose", "#f43f5e"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,52 +44,60 @@ impl SearchEngine {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemePreset {
-    Midnight,
-    Obsidian,
-    Cyber,
-    Sakura,
-    Emerald,
-    Crimson,
+    #[serde(alias = "Midnight", alias = "Obsidian")]
+    Graphite,
+    Paper,
+    #[serde(alias = "Emerald", alias = "Cyber")]
+    NordicPine,
+    Mist,
+    #[serde(alias = "Crimson", alias = "Sakura")]
+    Espresso,
+    Sand,
 }
 
 impl Default for ThemePreset {
     fn default() -> Self {
-        Self::Midnight
+        Self::Graphite
     }
 }
 
 impl ThemePreset {
     pub fn id(&self) -> &'static str {
         match self {
-            Self::Midnight => "midnight",
-            Self::Obsidian => "obsidian",
-            Self::Cyber => "cyber",
-            Self::Sakura => "sakura",
-            Self::Emerald => "emerald",
-            Self::Crimson => "crimson",
+            Self::Graphite => "graphite",
+            Self::Paper => "paper",
+            Self::NordicPine => "nordic_pine",
+            Self::Mist => "mist",
+            Self::Espresso => "espresso",
+            Self::Sand => "sand",
         }
     }
 
     pub fn from_id(s: &str) -> Self {
         match s {
-            "obsidian" => Self::Obsidian,
-            "cyber" => Self::Cyber,
-            "sakura" => Self::Sakura,
-            "emerald" => Self::Emerald,
-            "crimson" => Self::Crimson,
-            _ => Self::Midnight,
+            "paper" => Self::Paper,
+            "nordic_pine" | "emerald" | "cyber" => Self::NordicPine,
+            "mist" => Self::Mist,
+            "espresso" | "crimson" | "sakura" => Self::Espresso,
+            "sand" => Self::Sand,
+            _ => Self::Graphite,
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Midnight => "Midnight Indigo",
-            Self::Obsidian => "Obsidian Pro",
-            Self::Cyber => "Cyber Cyan",
-            Self::Sakura => "Sakura Night",
-            Self::Emerald => "Emerald Slate",
-            Self::Crimson => "Crimson Dark",
+            Self::Graphite => "Graphite",
+            Self::Paper => "Paper",
+            Self::NordicPine => "Nordic Pine",
+            Self::Mist => "Mist",
+            Self::Espresso => "Espresso",
+            Self::Sand => "Sand",
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn is_light(&self) -> bool {
+        matches!(self, Self::Paper | Self::Mist | Self::Sand)
     }
 }
 
@@ -119,104 +127,260 @@ impl Rgb {
         let b = (self.2 as f32 * (1.0 - w) + other.2 as f32 * w).round() as u8;
         Self(r, g, b)
     }
+
+    pub fn relative_luminance(self) -> f64 {
+        fn lin(c: u8) -> f64 {
+            let v = (c as f64) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * lin(self.0) + 0.7152 * lin(self.1) + 0.0722 * lin(self.2)
+    }
+
+    pub fn contrast_ratio(self, other: Self) -> f64 {
+        let l1 = self.relative_luminance();
+        let l2 = other.relative_luminance();
+        let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+}
+
+fn pick_on_accent(bg: Rgb) -> Rgb {
+    let white = Rgb(0xff, 0xff, 0xff);
+    let dark_ink = Rgb(0x0c, 0x11, 0x16);
+    if white.contrast_ratio(bg) >= dark_ink.contrast_ratio(bg) {
+        white
+    } else {
+        dark_ink
+    }
+}
+
+fn ensure_contrast_against(color: Rgb, bgs: &[Rgb], min_ratio: f64, is_light_bg: bool) -> Rgb {
+    if bgs.iter().all(|&b| color.contrast_ratio(b) >= min_ratio) {
+        return color;
+    }
+    let target = if is_light_bg {
+        Rgb(0x0b, 0x12, 0x15)
+    } else {
+        Rgb(0xf8, 0xfa, 0xfc)
+    };
+    for step in 1..=32 {
+        let candidate = color.mix(target, (step as f32) / 32.0);
+        if bgs.iter().all(|&b| candidate.contrast_ratio(b) >= min_ratio) {
+            return candidate;
+        }
+    }
+    target
 }
 
 #[derive(Clone, Debug)]
 pub struct ThemePalette {
+    pub is_light: bool,
     pub bg_app: Rgb,
     pub bg_chrome: Rgb,
     pub bg_surface: Rgb,
     pub bg_hover: Rgb,
     pub bg_active: Rgb,
     pub border: Rgb,
+    pub border_subtle: Rgb,
     pub text_primary: Rgb,
     pub text_muted: Rgb,
+    pub text_inactive_tab: Rgb,
+    pub text_disabled: Rgb,
     pub accent: Rgb,
+    pub accent_text: Rgb,
     pub accent_soft: Rgb,
+    pub on_accent: Rgb,
+    pub focus_ring: Rgb,
+    pub danger_fg: Rgb,
+    pub danger_bg: Rgb,
+    pub danger_border: Rgb,
+    pub success_fg: Rgb,
+    pub warning_fg: Rgb,
 }
 
 impl ThemePalette {
     pub fn from_settings(settings: &Settings) -> Self {
         let mut p = match settings.theme_preset {
-            ThemePreset::Midnight => Self {
-                bg_app: Rgb(0x13, 0x13, 0x1f),
-                bg_chrome: Rgb(0x18, 0x18, 0x26),
-                bg_surface: Rgb(0x0f, 0x0f, 0x19),
-                bg_hover: Rgb(0x21, 0x21, 0x35),
-                bg_active: Rgb(0x27, 0x27, 0x42),
-                border: Rgb(0x2c, 0x2c, 0x44),
-                text_primary: Rgb(0xed, 0xed, 0xf7),
-                text_muted: Rgb(0x88, 0x88, 0xa8),
-                accent: Rgb(0xa7, 0x8b, 0xfa),
-                accent_soft: Rgb(0x2b, 0x24, 0x4b),
+            ThemePreset::Graphite => Self {
+                is_light: false,
+                bg_app: Rgb(0x0f, 0x12, 0x17),
+                bg_chrome: Rgb(0x16, 0x1a, 0x21),
+                bg_surface: Rgb(0x1e, 0x24, 0x2d),
+                bg_hover: Rgb(0x26, 0x2d, 0x38),
+                bg_active: Rgb(0x16, 0x31, 0x30),
+                border: Rgb(0x75, 0x7e, 0x8c),
+                border_subtle: Rgb(0x2f, 0x37, 0x44),
+                text_primary: Rgb(0xf2, 0xf5, 0xf9),
+                text_muted: Rgb(0xa3, 0xad, 0xb9),
+                text_inactive_tab: Rgb(0xc1, 0xc9, 0xd4),
+                text_disabled: Rgb(0x73, 0x7d, 0x8b),
+                accent: Rgb(0x0f, 0x76, 0x6e),
+                accent_text: Rgb(0x5e, 0xea, 0xd4),
+                accent_soft: Rgb(0x18, 0x38, 0x36),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0x2d, 0xd4, 0xbf),
+                danger_fg: Rgb(0xfd, 0xa4, 0xaf),
+                danger_bg: Rgb(0x3f, 0x19, 0x22),
+                danger_border: Rgb(0xfb, 0x71, 0x85),
+                success_fg: Rgb(0x6e, 0xe7, 0xb7),
+                warning_fg: Rgb(0xfc, 0xd3, 0x4d),
             },
-            ThemePreset::Obsidian => Self {
-                bg_app: Rgb(0x0d, 0x0d, 0x10),
-                bg_chrome: Rgb(0x14, 0x14, 0x18),
-                bg_surface: Rgb(0x09, 0x09, 0x0c),
-                bg_hover: Rgb(0x1e, 0x1e, 0x24),
-                bg_active: Rgb(0x26, 0x26, 0x2f),
-                border: Rgb(0x2b, 0x2b, 0x34),
-                text_primary: Rgb(0xf2, 0xf2, 0xf5),
-                text_muted: Rgb(0x8e, 0x8e, 0x9b),
-                accent: Rgb(0x60, 0xa5, 0xfa),
-                accent_soft: Rgb(0x1c, 0x2a, 0x3f),
+            ThemePreset::Paper => Self {
+                is_light: true,
+                bg_app: Rgb(0xff, 0xff, 0xff),
+                bg_chrome: Rgb(0xf4, 0xf5, 0xf7),
+                bg_surface: Rgb(0xff, 0xff, 0xff),
+                bg_hover: Rgb(0xe7, 0xea, 0xef),
+                bg_active: Rgb(0xdf, 0xf2, 0xef),
+                border: Rgb(0x75, 0x7d, 0x8a),
+                border_subtle: Rgb(0xd9, 0xde, 0xe6),
+                text_primary: Rgb(0x11, 0x18, 0x27),
+                text_muted: Rgb(0x4b, 0x55, 0x63),
+                text_inactive_tab: Rgb(0x37, 0x41, 0x51),
+                text_disabled: Rgb(0x6b, 0x72, 0x80),
+                accent: Rgb(0x0f, 0x76, 0x6e),
+                accent_text: Rgb(0x0d, 0x63, 0x5c),
+                accent_soft: Rgb(0xda, 0xf1, 0xee),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0x0f, 0x76, 0x6e),
+                danger_fg: Rgb(0xb9, 0x1c, 0x1c),
+                danger_bg: Rgb(0xfe, 0xe2, 0xe2),
+                danger_border: Rgb(0xdc, 0x26, 0x26),
+                success_fg: Rgb(0x06, 0x5f, 0x46),
+                warning_fg: Rgb(0x92, 0x40, 0x0e),
             },
-            ThemePreset::Cyber => Self {
-                bg_app: Rgb(0x0a, 0x10, 0x1b),
-                bg_chrome: Rgb(0x0f, 0x17, 0x2a),
-                bg_surface: Rgb(0x08, 0x0d, 0x17),
-                bg_hover: Rgb(0x18, 0x23, 0x3b),
-                bg_active: Rgb(0x1d, 0x2b, 0x48),
-                border: Rgb(0x23, 0x35, 0x54),
-                text_primary: Rgb(0xe8, 0xf2, 0xff),
-                text_muted: Rgb(0x7c, 0x93, 0xb8),
-                accent: Rgb(0x22, 0xd3, 0xee),
-                accent_soft: Rgb(0x11, 0x33, 0x44),
+            ThemePreset::NordicPine => Self {
+                is_light: false,
+                bg_app: Rgb(0x0d, 0x15, 0x14),
+                bg_chrome: Rgb(0x12, 0x1e, 0x1c),
+                bg_surface: Rgb(0x19, 0x29, 0x26),
+                bg_hover: Rgb(0x21, 0x35, 0x31),
+                bg_active: Rgb(0x16, 0x3c, 0x37),
+                border: Rgb(0x72, 0x8b, 0x85),
+                border_subtle: Rgb(0x2a, 0x3e, 0x3a),
+                text_primary: Rgb(0xee, 0xf5, 0xf3),
+                text_muted: Rgb(0x9e, 0xb3, 0xad),
+                text_inactive_tab: Rgb(0xbd, 0xd0, 0xca),
+                text_disabled: Rgb(0x6e, 0x86, 0x7f),
+                accent: Rgb(0x0d, 0x7e, 0x73),
+                accent_text: Rgb(0x5e, 0xea, 0xd4),
+                accent_soft: Rgb(0x16, 0x38, 0x34),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0x2d, 0xd4, 0xbf),
+                danger_fg: Rgb(0xfd, 0xa4, 0xaf),
+                danger_bg: Rgb(0x3e, 0x1a, 0x21),
+                danger_border: Rgb(0xfb, 0x71, 0x85),
+                success_fg: Rgb(0x6e, 0xe7, 0xb7),
+                warning_fg: Rgb(0xfc, 0xd3, 0x4d),
             },
-            ThemePreset::Sakura => Self {
-                bg_app: Rgb(0x15, 0x0f, 0x19),
-                bg_chrome: Rgb(0x1d, 0x15, 0x23),
-                bg_surface: Rgb(0x10, 0x0b, 0x14),
-                bg_hover: Rgb(0x29, 0x1d, 0x32),
-                bg_active: Rgb(0x34, 0x22, 0x3d),
-                border: Rgb(0x3a, 0x28, 0x45),
-                text_primary: Rgb(0xf8, 0xeb, 0xf4),
-                text_muted: Rgb(0xa3, 0x84, 0x9b),
-                accent: Rgb(0xf4, 0x72, 0xb6),
-                accent_soft: Rgb(0x3f, 0x1d, 0x34),
+            ThemePreset::Mist => Self {
+                is_light: true,
+                bg_app: Rgb(0xf8, 0xfa, 0xfc),
+                bg_chrome: Rgb(0xee, 0xf2, 0xf6),
+                bg_surface: Rgb(0xff, 0xff, 0xff),
+                bg_hover: Rgb(0xe1, 0xe7, 0xef),
+                bg_active: Rgb(0xdc, 0xec, 0xf9),
+                border: Rgb(0x6f, 0x7c, 0x8e),
+                border_subtle: Rgb(0xd3, 0xdc, 0xe6),
+                text_primary: Rgb(0x0f, 0x17, 0x2a),
+                text_muted: Rgb(0x47, 0x55, 0x69),
+                text_inactive_tab: Rgb(0x33, 0x41, 0x55),
+                text_disabled: Rgb(0x64, 0x74, 0x8b),
+                accent: Rgb(0x1d, 0x4e, 0xd8),
+                accent_text: Rgb(0x1d, 0x4e, 0xd8),
+                accent_soft: Rgb(0xdb, 0xea, 0xfe),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0x1d, 0x4e, 0xd8),
+                danger_fg: Rgb(0xb9, 0x1c, 0x1c),
+                danger_bg: Rgb(0xfe, 0xe2, 0xe2),
+                danger_border: Rgb(0xdc, 0x26, 0x26),
+                success_fg: Rgb(0x06, 0x5f, 0x46),
+                warning_fg: Rgb(0x92, 0x40, 0x0e),
             },
-            ThemePreset::Emerald => Self {
-                bg_app: Rgb(0x0c, 0x15, 0x12),
-                bg_chrome: Rgb(0x11, 0x1d, 0x19),
-                bg_surface: Rgb(0x09, 0x10, 0x0e),
-                bg_hover: Rgb(0x18, 0x29, 0x23),
-                bg_active: Rgb(0x1e, 0x35, 0x2c),
-                border: Rgb(0x24, 0x3c, 0x33),
-                text_primary: Rgb(0xe8, 0xf7, 0xf1),
-                text_muted: Rgb(0x7d, 0xa2, 0x95),
-                accent: Rgb(0x34, 0xd3, 0x99),
-                accent_soft: Rgb(0x14, 0x38, 0x2b),
+            ThemePreset::Espresso => Self {
+                is_light: false,
+                bg_app: Rgb(0x15, 0x12, 0x10),
+                bg_chrome: Rgb(0x1c, 0x18, 0x16),
+                bg_surface: Rgb(0x26, 0x20, 0x1d),
+                bg_hover: Rgb(0x31, 0x29, 0x25),
+                bg_active: Rgb(0x3d, 0x28, 0x1f),
+                border: Rgb(0x86, 0x7a, 0x73),
+                border_subtle: Rgb(0x3a, 0x32, 0x2e),
+                text_primary: Rgb(0xf6, 0xf2, 0xef),
+                text_muted: Rgb(0xb5, 0xa8, 0xa1),
+                text_inactive_tab: Rgb(0xd1, 0xc6, 0xc0),
+                text_disabled: Rgb(0x83, 0x77, 0x71),
+                accent: Rgb(0xb4, 0x53, 0x09),
+                accent_text: Rgb(0xfb, 0xbf, 0x24),
+                accent_soft: Rgb(0x38, 0x24, 0x18),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0xf5, 0x9e, 0x0b),
+                danger_fg: Rgb(0xfd, 0xa4, 0xaf),
+                danger_bg: Rgb(0x3f, 0x19, 0x20),
+                danger_border: Rgb(0xfb, 0x71, 0x85),
+                success_fg: Rgb(0x6e, 0xe7, 0xb7),
+                warning_fg: Rgb(0xfc, 0xd3, 0x4d),
             },
-            ThemePreset::Crimson => Self {
-                bg_app: Rgb(0x16, 0x0d, 0x11),
-                bg_chrome: Rgb(0x1e, 0x13, 0x18),
-                bg_surface: Rgb(0x11, 0x0a, 0x0d),
-                bg_hover: Rgb(0x2c, 0x1a, 0x22),
-                bg_active: Rgb(0x38, 0x20, 0x2a),
-                border: Rgb(0x41, 0x26, 0x31),
-                text_primary: Rgb(0xfa, 0xeb, 0xf0),
-                text_muted: Rgb(0xa6, 0x81, 0x8d),
-                accent: Rgb(0xfb, 0x71, 0x85),
-                accent_soft: Rgb(0x42, 0x1d, 0x28),
+            ThemePreset::Sand => Self {
+                is_light: true,
+                bg_app: Rgb(0xfc, 0xfa, 0xf6),
+                bg_chrome: Rgb(0xf3, 0xef, 0xe6),
+                bg_surface: Rgb(0xff, 0xff, 0xff),
+                bg_hover: Rgb(0xe8, 0xe2, 0xd5),
+                bg_active: Rgb(0xef, 0xe4, 0xd0),
+                border: Rgb(0x7b, 0x73, 0x65),
+                border_subtle: Rgb(0xdd, 0xd6, 0xc7),
+                text_primary: Rgb(0x1c, 0x19, 0x17),
+                text_muted: Rgb(0x57, 0x53, 0x4e),
+                text_inactive_tab: Rgb(0x44, 0x40, 0x3c),
+                text_disabled: Rgb(0x78, 0x71, 0x6c),
+                accent: Rgb(0x9a, 0x34, 0x12),
+                accent_text: Rgb(0x9a, 0x34, 0x12),
+                accent_soft: Rgb(0xff, 0xed, 0xd5),
+                on_accent: Rgb(0xff, 0xff, 0xff),
+                focus_ring: Rgb(0x9a, 0x34, 0x12),
+                danger_fg: Rgb(0xb9, 0x1c, 0x1c),
+                danger_bg: Rgb(0xfe, 0xe2, 0xe2),
+                danger_border: Rgb(0xdc, 0x26, 0x26),
+                success_fg: Rgb(0x06, 0x5f, 0x46),
+                warning_fg: Rgb(0x92, 0x40, 0x0e),
             },
         };
 
         if let Some(ref custom) = settings.custom_accent_hex {
             if let Some(rgb) = Rgb::parse_hex(custom) {
                 p.accent = rgb;
-                p.accent_soft = p.bg_chrome.mix(rgb, 0.22);
-                p.bg_active = p.bg_chrome.mix(rgb, 0.16);
+                p.on_accent = pick_on_accent(rgb);
+                p.accent_soft = p.bg_chrome.mix(rgb, if p.is_light { 0.14 } else { 0.18 });
+                p.bg_active = p.bg_chrome.mix(rgb, if p.is_light { 0.13 } else { 0.14 });
+                let all_bgs = [
+                    p.bg_app,
+                    p.bg_chrome,
+                    p.bg_surface,
+                    p.bg_hover,
+                    p.bg_active,
+                    p.accent_soft,
+                ];
+                p.accent_text = ensure_contrast_against(rgb, &all_bgs, 4.6, p.is_light);
+                p.focus_ring = ensure_contrast_against(
+                    rgb,
+                    &[p.bg_chrome, p.bg_surface, p.bg_app],
+                    3.1,
+                    p.is_light,
+                );
+                let std_bgs = [p.bg_app, p.bg_chrome, p.bg_surface, p.bg_hover, p.bg_active];
+                p.text_muted = ensure_contrast_against(p.text_muted, &std_bgs, 4.6, p.is_light);
+                p.text_inactive_tab =
+                    ensure_contrast_against(p.text_inactive_tab, &std_bgs, 4.6, p.is_light);
+                p.success_fg = ensure_contrast_against(p.success_fg, &std_bgs, 4.6, p.is_light);
+                p.warning_fg = ensure_contrast_against(p.warning_fg, &std_bgs, 4.6, p.is_light);
+                p.border = ensure_contrast_against(p.border, &std_bgs, 3.05, p.is_light);
+                p.danger_border =
+                    ensure_contrast_against(p.danger_border, &std_bgs, 3.05, p.is_light);
             }
         }
         p
@@ -248,7 +412,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme_preset: ThemePreset::Midnight,
+            theme_preset: ThemePreset::Graphite,
             custom_accent_hex: None,
             search_engine: SearchEngine::Google,
             max_live_tabs: 3,
@@ -459,6 +623,23 @@ pub struct BrowserData {
     next_download_id: u64,
     unsaved_blocked_ticks: u64,
     data_dir: PathBuf,
+}
+
+impl Default for BrowserData {
+    fn default() -> Self {
+        Self {
+            settings: Settings::default(),
+            history: Vec::new(),
+            bookmarks: Vec::new(),
+            downloads: Vec::new(),
+            quick_links: default_quick_links(),
+            folders: Vec::new(),
+            api_token: "test_token_only".to_string(),
+            next_download_id: 1,
+            unsaved_blocked_ticks: 0,
+            data_dir: std::env::temp_dir().join("KurowserTest"),
+        }
+    }
 }
 
 impl BrowserData {
@@ -931,7 +1112,8 @@ pub fn unix_now() -> u64 {
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Option<T> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    let clean = content.trim_start_matches('\u{FEFF}');
+    serde_json::from_str(clean).ok()
 }
 
 fn write_json<T: Serialize>(path: PathBuf, data: &T) {
@@ -989,5 +1171,51 @@ mod tests {
         assert_eq!(sanitize_download_filename("file/..\\name.pdf"), "file..name.pdf");
         assert_eq!(sanitize_download_filename("report_v1.pdf"), "report_v1.pdf");
         assert_eq!(sanitize_download_filename("..."), "download");
+    }
+
+    #[test]
+    fn all_theme_presets_and_custom_accents_meet_wcag() {
+        let presets = [
+            ThemePreset::Graphite,
+            ThemePreset::Paper,
+            ThemePreset::NordicPine,
+            ThemePreset::Mist,
+            ThemePreset::Espresso,
+            ThemePreset::Sand,
+        ];
+        for preset in presets {
+            let mut s = Settings::default();
+            s.theme_preset = preset;
+            for accent_opt in [None, Some("#0f766e"), Some("#1d4ed8"), Some("#facc15"), Some("#ec4899")] {
+                s.custom_accent_hex = accent_opt.map(|x| x.to_string());
+                let p = ThemePalette::from_settings(&s);
+                assert_eq!(p.is_light, preset.is_light());
+                for bg in [p.bg_app, p.bg_chrome, p.bg_surface, p.bg_hover, p.bg_active] {
+                    assert!(p.text_primary.contrast_ratio(bg) >= 4.5);
+                    assert!(p.text_muted.contrast_ratio(bg) >= 4.5);
+                    assert!(p.text_inactive_tab.contrast_ratio(bg) >= 4.5);
+                    assert!(p.accent_text.contrast_ratio(bg) >= 4.5);
+                    assert!(p.success_fg.contrast_ratio(bg) >= 4.5);
+                    assert!(p.warning_fg.contrast_ratio(bg) >= 4.5);
+                    assert!(p.border.contrast_ratio(bg) >= 3.0);
+                    assert!(p.danger_border.contrast_ratio(bg) >= 3.0);
+                }
+                assert!(p.on_accent.contrast_ratio(p.accent) >= 4.5);
+                assert!(p.accent_text.contrast_ratio(p.accent_soft) >= 4.5);
+                assert!(p.danger_fg.contrast_ratio(p.danger_bg) >= 4.5);
+                assert!(p.text_disabled.contrast_ratio(p.bg_chrome) >= 3.0);
+                assert!(p.text_disabled.contrast_ratio(p.bg_surface) >= 3.0);
+                assert!(p.focus_ring.contrast_ratio(p.bg_chrome) >= 3.0);
+                assert!(p.focus_ring.contrast_ratio(p.bg_surface) >= 3.0);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_theme_presets_deserialize_safely() {
+        let parsed: ThemePreset = serde_json::from_str("\"Midnight\"").unwrap();
+        assert_eq!(parsed, ThemePreset::Graphite);
+        assert_eq!(ThemePreset::from_id("emerald"), ThemePreset::NordicPine);
+        assert_eq!(ThemePreset::from_id("paper"), ThemePreset::Paper);
     }
 }

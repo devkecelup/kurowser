@@ -10,8 +10,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller2, ICoreWebView2CustomSchemeRegistration, ICoreWebView2Environment,
     ICoreWebView2EnvironmentOptions, ICoreWebView2NavigationStartingEventArgs3,
     ICoreWebView2Settings3, ICoreWebView2Settings4, ICoreWebView2Settings5,
-    ICoreWebView2Settings6, ICoreWebView2_13, ICoreWebView2_15, ICoreWebView2_19, ICoreWebView2_2,
-    ICoreWebView2_3, ICoreWebView2_4, ICoreWebView2_8, COREWEBVIEW2_COLOR, COREWEBVIEW2_DOWNLOAD_STATE,
+    ICoreWebView2Settings6, ICoreWebView2_13, ICoreWebView2_15, ICoreWebView2_19, ICoreWebView2_3,
+    ICoreWebView2_4, ICoreWebView2_8, COREWEBVIEW2_COLOR, COREWEBVIEW2_DOWNLOAD_STATE,
     COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
     COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
     COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
@@ -25,22 +25,26 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS,
     COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS, COREWEBVIEW2_PERMISSION_KIND_OTHER_SENSORS,
     COREWEBVIEW2_PERMISSION_STATE_DEFAULT, COREWEBVIEW2_PERMISSION_STATE_DENY,
-    COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK, COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK, COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT,
+    COREWEBVIEW2_SCROLLBAR_STYLE_FLUENT_OVERLAY, COREWEBVIEW2_WEB_RESOURCE_CONTEXT,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST,
 };
 use webview2_com::{
-    take_pwstr, AcceleratorKeyPressedEventHandler, ContentLoadingEventHandler,
+    take_pwstr, AcceleratorKeyPressedEventHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, ContentLoadingEventHandler,
     CoreWebView2CustomSchemeRegistration, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DOMContentLoadedEventHandler, DocumentTitleChangedEventHandler, DownloadStartingEventHandler,
-    FaviconChangedEventHandler, GetFaviconCompletedHandler,
-    NavigationCompletedEventHandler, NavigationStartingEventHandler,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
+    GetFaviconCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
     NewWindowRequestedEventHandler, PermissionRequestedEventHandler, SourceChangedEventHandler,
     StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
 };
 use windows::core::{w, HSTRING, Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, IStream, STREAM_SEEK_SET};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WinRT::EventRegistrationToken;
@@ -73,6 +77,13 @@ const FONT_REGULAR: &[u8] = include_bytes!("../assets/fonts/Poppins-Regular.ttf"
 const FONT_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Poppins-Medium.ttf");
 const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Poppins-SemiBold.ttf");
 const LOGO_PNG: &[u8] = include_bytes!("../assets/kurowser_logo.png");
+const EMPTY_PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
 
 const BROWSER_ARGS: &str = "\
     --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
@@ -91,6 +102,7 @@ pub struct PixelRect {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    pub corner_diameter: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +160,7 @@ pub struct KurowserWebView {
     controller: ICoreWebView2Controller,
     webview: ICoreWebView2,
     expected_internal_nav: Rc<RefCell<Option<String>>>,
+    shields_script_id: Rc<RefCell<Option<String>>>,
 }
 
 impl Drop for KurowserWebView {
@@ -189,6 +202,7 @@ impl KurowserWebView {
                 h,
                 SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
             );
+            apply_container_region(self.hwnd, w, h, bounds.corner_diameter);
         }
     }
 
@@ -208,6 +222,21 @@ impl KurowserWebView {
                     B: rgba.2,
                     A: rgba.3,
                 });
+            }
+        }
+    }
+
+    pub fn set_preferred_color_scheme(&self, is_light: bool) {
+        unsafe {
+            if let Ok(wv13) = self.webview.cast::<ICoreWebView2_13>() {
+                if let Ok(profile) = wv13.Profile() {
+                    let scheme = if is_light {
+                        COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT
+                    } else {
+                        COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK
+                    };
+                    let _ = profile.SetPreferredColorScheme(scheme);
+                }
             }
         }
     }
@@ -415,7 +444,22 @@ fn create_container_hwnd(parent: HWND, bounds: PixelRect) -> Result<HWND, String
         .map_err(|e| format!("CreateWindowExW failed: {:?}", e))?
     };
 
+    unsafe {
+        apply_container_region(hwnd, bounds.width.max(1), bounds.height.max(1), bounds.corner_diameter);
+    }
+
     Ok(hwnd)
+}
+
+unsafe fn apply_container_region(hwnd: HWND, w: i32, h: i32, corner_diameter: i32) {
+    if corner_diameter > 2 {
+        let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, corner_diameter, corner_diameter);
+        if !rgn.is_invalid() {
+            let _ = SetWindowRgn(hwnd, rgn, BOOL(1));
+        }
+    } else {
+        let _ = SetWindowRgn(hwnd, None, BOOL(1));
+    }
 }
 
 unsafe extern "system" fn default_container_wnd_proc(
@@ -448,10 +492,10 @@ pub fn create_webview(
         on_ad_blocked,
     } = callbacks;
 
-    let bg_color = {
+    let (bg_color, is_light) = {
         let d = browser_data.lock().unwrap_or_else(|e| e.into_inner());
         let p = d.palette();
-        (p.bg_app.0, p.bg_app.1, p.bg_app.2, 255)
+        ((p.bg_app.0, p.bg_app.1, p.bg_app.2, 255), p.is_light)
     };
 
     let container_hwnd = create_container_hwnd(parent_hwnd, bounds)?;
@@ -483,11 +527,16 @@ pub fn create_webview(
             .map_err(|e| format!("CoreWebView2 failed: {:?}", e))?
     };
 
-    // Dark color scheme + matching app background
+    // Sync WebView2 preferred color scheme + matching app background
     unsafe {
         if let Ok(wv13) = webview.cast::<ICoreWebView2_13>() {
             if let Ok(profile) = wv13.Profile() {
-                let _ = profile.SetPreferredColorScheme(COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK);
+                let scheme = if is_light {
+                    COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT
+                } else {
+                    COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK
+                };
+                let _ = profile.SetPreferredColorScheme(scheme);
             }
         }
         if let Ok(c2) = controller.cast::<ICoreWebView2Controller2>() {
@@ -609,13 +658,29 @@ pub fn create_webview(
                         let is_top_doc = res_ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT;
 
                         if adblock::should_block_request(&uri, &page_url, is_top_doc, &policy) {
-                            let headers = HSTRING::from("Content-Type: text/plain\r\n");
-                            if let Ok(resp) = env_for_req.CreateWebResourceResponse(
-                                None,
-                                403,
-                                w!("Blocked by Kurowser Shields"),
-                                &headers,
-                            ) {
+                            let (ctype, body): (&str, &[u8]) =
+                                if res_ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT {
+                                    ("application/javascript; charset=utf-8", b"/* blocked */")
+                                } else if res_ctx
+                                    == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST
+                                {
+                                    ("application/json; charset=utf-8", b"{}")
+                                } else if res_ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_STYLESHEET {
+                                    ("text/css; charset=utf-8", b"")
+                                } else if res_ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE {
+                                    ("image/png", EMPTY_PNG_1X1)
+                                } else if res_ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT {
+                                    ("text/html; charset=utf-8", b"")
+                                } else {
+                                    ("text/plain; charset=utf-8", b"")
+                                };
+                            let headers = format!(
+                                "Content-Type: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n",
+                                ctype
+                            );
+                            if let Ok(resp) =
+                                make_response(&env_for_req, 200, "OK", &headers, body)
+                            {
                                 let _ = args.SetResponse(&resp);
                             }
                             req_ad_cb(normalize_host(&page_url));
@@ -866,38 +931,15 @@ pub fn create_webview(
         );
     }
 
-    // 8. Cosmetic Ad Hiding script on DOMContentLoaded (HTTP/HTTPS only when Shields ON)
-    let cosmetic_data = Arc::clone(&browser_data);
-    if let Ok(wv2) = webview.cast::<ICoreWebView2_2>() {
-        unsafe {
-            let _ = wv2.add_DOMContentLoaded(
-                &DOMContentLoadedEventHandler::create(Box::new(move |wv, _| {
-                    let Some(wv) = wv else {
-                        return Ok(());
-                    };
-                    let mut pw = PWSTR::null();
-                    if wv.Source(&mut pw).is_err() {
-                        return Ok(());
-                    }
-                    let page_url = take_pwstr(pw);
-                    if !(page_url.starts_with("https://") || page_url.starts_with("http://")) {
-                        return Ok(());
-                    }
-                    let policy = cosmetic_data
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .shield_policy();
-                    let host = normalize_host(&page_url);
-                    if policy.cosmetic_enabled && policy.is_active_for_site(&host) {
-                        let js = HSTRING::from(adblock::COSMETIC_FILTER_JS);
-                        let _ = wv.ExecuteScript(&js, None);
-                    }
-                    Ok(())
-                })),
-                &mut token,
-            );
-        }
-    }
+    // 8. Early document-start AdBlock & YouTube ad pruner registration (before first navigation)
+    let shields_script_id = Rc::new(RefCell::new(None));
+    let initial_policy = {
+        browser_data
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shield_policy()
+    };
+    install_shields_script_blocking(&webview, &shields_script_id, &initial_policy);
 
     // 9. SourceChanged (live address bar sync including pushState SPAs)
     unsafe {
@@ -988,6 +1030,7 @@ pub fn create_webview(
         controller,
         webview,
         expected_internal_nav,
+        shields_script_id,
     };
 
     kwv.set_bounds(bounds);
@@ -1619,8 +1662,84 @@ pub fn set_bounds(webview: &KurowserWebView, bounds: PixelRect) {
     webview.set_bounds(bounds);
 }
 
-pub fn apply_theme_bg(webview: &KurowserWebView, bg: (u8, u8, u8)) {
+pub fn apply_theme(webview: &KurowserWebView, bg: (u8, u8, u8), is_light: bool) {
     webview.set_background_color((bg.0, bg.1, bg.2, 255));
+    webview.set_preferred_color_scheme(is_light);
+}
+
+fn install_shields_script_blocking(
+    webview: &ICoreWebView2,
+    script_id_slot: &Rc<RefCell<Option<String>>>,
+    policy: &adblock::ShieldPolicy,
+) {
+    if let Some(old_id) = script_id_slot.borrow_mut().take() {
+        unsafe {
+            let _ = webview.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(old_id));
+        }
+    }
+    let Some(script) = adblock::build_document_script(policy, adblock::process_salt()) else {
+        return;
+    };
+    let (tx, rx) = mpsc::channel();
+    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+        move |error_code, id_str| {
+            let id_opt = if error_code.is_ok() {
+                Some(id_str)
+            } else {
+                None
+            };
+            let _ = tx.send(id_opt);
+            Ok(())
+        },
+    ));
+    let js = HSTRING::from(script);
+    if unsafe { webview.AddScriptToExecuteOnDocumentCreated(&js, &handler) }.is_ok() {
+        if let Ok(Some(id)) = webview2_com::wait_with_pump(rx) {
+            if !id.is_empty() {
+                *script_id_slot.borrow_mut() = Some(id);
+            }
+        }
+    }
+}
+
+pub fn sync_shields_script(
+    kwv: &KurowserWebView,
+    policy: &adblock::ShieldPolicy,
+    reload_after: bool,
+) {
+    if let Some(old_id) = kwv.shields_script_id.borrow_mut().take() {
+        unsafe {
+            let _ = kwv
+                .webview
+                .RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(old_id));
+        }
+    }
+    let Some(script) = adblock::build_document_script(policy, adblock::process_salt()) else {
+        if reload_after {
+            reload(kwv);
+        }
+        return;
+    };
+
+    let slot = Rc::clone(&kwv.shields_script_id);
+    let wv_clone = kwv.webview.clone();
+    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+        move |error_code, id_str| {
+            if error_code.is_ok() && !id_str.is_empty() {
+                *slot.borrow_mut() = Some(id_str);
+            }
+            if reload_after {
+                let _ = unsafe { wv_clone.Reload() };
+            }
+            Ok(())
+        },
+    ));
+    let js = HSTRING::from(script);
+    if unsafe { kwv.webview.AddScriptToExecuteOnDocumentCreated(&js, &handler) }.is_err()
+        && reload_after
+    {
+        reload(kwv);
+    }
 }
 
 pub fn normalize_input(input: &str, search_engine: SearchEngine) -> String {

@@ -31,6 +31,7 @@ fn find_rc_exe() -> Option<PathBuf> {
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/kurowser.ico");
+    println!("cargo:rerun-if-changed=assets/kurowser.manifest");
     println!("cargo:rerun-if-changed=assets/kurowser.rc");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

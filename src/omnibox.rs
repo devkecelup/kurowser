@@ -64,7 +64,7 @@ const INTERNAL_PAGES: &[(&str, &str)] = &[
     ("History", "kurowser://history"),
     ("Bookmarks", "kurowser://bookmarks"),
     ("Downloads", "kurowser://downloads"),
-    ("Tema & Settings", "kurowser://settings"),
+    ("Pengaturan", "kurowser://settings"),
 ];
 
 pub fn suggest(

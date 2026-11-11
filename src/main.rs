@@ -25,6 +25,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::{EM_SETSEL, WM_MOUSELEAVE};
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -33,8 +34,8 @@ use engine::{AcceleratorAction, InternalApiEvent, WebViewCallbacks};
 use storage::{BrowserData, Rgb, ThemePalette, FOLDER_PALETTE};
 use tabs::{FolderId, TabId, TabStore};
 use ui::{
-    AddrBarEvent, DragDropTarget, FaviconCache, FolderRenameEvent, Layout, OmniboxNavKey,
-    OmniboxPopup, SidebarHit, TopbarButton,
+    AddrBarEvent, DragDropTarget, FaviconCache, FolderRenameEvent, Layout, NavVisualState,
+    OmniboxNavKey, OmniboxPopup, SidebarHit, TopbarButton,
 };
 
 #[derive(Debug)]
@@ -77,6 +78,10 @@ enum AppEvent {
         page_host: String,
     },
     ToggleSidebar,
+    WinMinimize,
+    WinMaximizeToggle,
+    WinClose,
+    FocusSearchBar,
     ToggleBookmark,
     TrimMemory,
     SubmitAddressBar(String),
@@ -161,12 +166,38 @@ fn save_folders_state(st: &AppState) {
         .save_folders(exported);
 }
 
-fn reload_active_tab(st: &AppState) {
-    if let Some(tab) = st.tab_store.active_tab() {
-        if !tab.url.starts_with("kurowser://") {
-            if let Some(ref wv) = tab.webview {
-                engine::reload(wv);
-            }
+fn nav_has_shield_badge(st: &AppState) -> bool {
+    let Some(tab) = st.tab_store.active_tab() else {
+        return false;
+    };
+    if tab.blocked_count == 0 || tab.url.starts_with("kurowser://") {
+        return false;
+    }
+    let policy = st
+        .browser_data
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shield_policy();
+    let host = adblock::normalize_host(&tab.url);
+    policy.is_active_for_site(&host)
+}
+
+fn sync_addr_bar_rect(st: &AppState) {
+    ui::position_address_bar(st.addr_hwnd, &st.layout, nav_has_shield_badge(st));
+}
+
+fn sync_all_shields(st: &AppState, reload_active: bool) {
+    let policy = st
+        .browser_data
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .shield_policy();
+    let active_id = st.tab_store.active_id;
+    for tab in &st.tab_store.tabs {
+        if let Some(ref wv) = tab.webview {
+            let reload_this =
+                reload_active && Some(tab.id) == active_id && !tab.url.starts_with("kurowser://");
+            engine::sync_shields_script(wv, &policy, reload_this);
         }
     }
 }
@@ -189,18 +220,26 @@ fn main() {
         .with_window_icon(ui::build_window_icon())
         .with_inner_size(LogicalSize::new(1180.0, 760.0))
         .with_min_inner_size(LogicalSize::new(560.0, 380.0))
-        .with_theme(Some(Theme::Dark))
+        .with_theme(Some(if initial_palette.is_light {
+            Theme::Light
+        } else {
+            Theme::Dark
+        }))
         .with_background_color((
-            initial_palette.bg_app.0,
-            initial_palette.bg_app.1,
-            initial_palette.bg_app.2,
+            initial_palette.bg_chrome.0,
+            initial_palette.bg_chrome.1,
+            initial_palette.bg_chrome.2,
             255,
         ))
         .build(&event_loop)
         .expect("Failed to create main window");
 
     let parent_hwnd = HWND(window.hwnd() as _);
-    ui::apply_dark_titlebar(parent_hwnd);
+    unsafe {
+        let style = GetWindowLongW(parent_hwnd, GWL_STYLE);
+        let _ = SetWindowLongW(parent_hwnd, GWL_STYLE, style | (WS_CLIPCHILDREN.0 as i32));
+    }
+    ui::apply_window_theme(parent_hwnd, initial_palette.is_light);
 
     let layout = Layout::compute(parent_hwnd, initial_sidebar);
     let mut web_context = engine::create_web_context();
@@ -217,7 +256,7 @@ fn main() {
         };
         let _ = proxy_addr.send_event(app_evt);
     });
-    ui::position_address_bar(addr_hwnd, &layout.topbar, layout.dpi_scale);
+    ui::position_address_bar(addr_hwnd, &layout, false);
     ui::set_address_bar_text(addr_hwnd, engine::START_URL);
 
     let proxy_rename = proxy.clone();
@@ -293,6 +332,19 @@ fn main() {
     }
 
     install_parent_subclass(parent_hwnd, Rc::clone(&state), proxy.clone());
+    ui::configure_borderless_frame(parent_hwnd, state.borrow().palette.is_light);
+    unsafe {
+        let _ = SetWindowPos(
+            parent_hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    recompute_layout_and_resize(&state, parent_hwnd);
 
     let web_context = RefCell::new(web_context);
 
@@ -405,11 +457,14 @@ fn main() {
                     {
                         let mut st = state.borrow_mut();
                         st.tab_store.toggle_folder_collapsed(fid);
-                        let max_scroll = ui::max_sidebar_scroll(
-                            &st.layout.sidebar,
-                            st.layout.dpi_scale,
-                            st.tab_store.sidebar_entries().len(),
-                        );
+                        let max_scroll = {
+                            let entries = st.tab_store.sidebar_entries();
+                            if st.sidebar_expanded {
+                                ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, &entries)
+                            } else {
+                                ui::max_rail_scroll(&st.layout, &entries)
+                            }
+                        };
                         st.sidebar_scroll = st.sidebar_scroll.clamp(0, max_scroll);
                         save_folders_state(&st);
                     }
@@ -523,7 +578,8 @@ fn main() {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .toggle_global_adblock();
-                        reload_active_tab(&st);
+                        sync_all_shields(&st, true);
+                        sync_addr_bar_rect(&st);
                     }
                     invalidate_chrome(parent_hwnd);
                 }
@@ -535,7 +591,8 @@ fn main() {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .toggle_site_allowlist(&host);
-                        reload_active_tab(&st);
+                        sync_all_shields(&st, true);
+                        sync_addr_bar_rect(&st);
                     }
                     invalidate_chrome(parent_hwnd);
                 }
@@ -547,7 +604,8 @@ fn main() {
                         d.settings.adblock_cosmetic = !d.settings.adblock_cosmetic;
                         d.save_settings();
                         drop(d);
-                        reload_active_tab(&st);
+                        sync_all_shields(&st, true);
+                        sync_addr_bar_rect(&st);
                     }
                     invalidate_chrome(parent_hwnd);
                 }
@@ -561,12 +619,42 @@ fn main() {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .increment_blocked_ads();
+                        if st.tab_store.active_id == Some(tab_id) {
+                            sync_addr_bar_rect(&st);
+                        }
                     }
                     invalidate_chrome(parent_hwnd);
                 }
 
                 AppEvent::ToggleSidebar => {
                     toggle_sidebar(&state, parent_hwnd);
+                }
+
+                AppEvent::WinMinimize => {
+                    unsafe {
+                        let _ = ShowWindow(parent_hwnd, SW_MINIMIZE);
+                    }
+                }
+
+                AppEvent::WinMaximizeToggle => {
+                    unsafe {
+                        let cmd = if IsZoomed(parent_hwnd).as_bool() {
+                            SW_RESTORE
+                        } else {
+                            SW_MAXIMIZE
+                        };
+                        let _ = ShowWindow(parent_hwnd, cmd);
+                    }
+                }
+
+                AppEvent::WinClose => {
+                    unsafe {
+                        let _ = PostMessageW(parent_hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                }
+
+                AppEvent::FocusSearchBar => {
+                    focus_address_bar(&state);
                 }
 
                 AppEvent::ToggleBookmark => {
@@ -635,8 +723,7 @@ fn main() {
                         };
                         st.omnibox.update_and_show(
                             st.parent_hwnd,
-                            &st.layout.topbar,
-                            st.layout.dpi_scale,
+                            &st.layout,
                             suggestions,
                         );
                     }
@@ -662,8 +749,7 @@ fn main() {
                             };
                             st.omnibox.update_and_show(
                                 st.parent_hwnd,
-                                &st.layout.topbar,
-                                st.layout.dpi_scale,
+                                &st.layout,
                                 suggestions,
                             );
                         }
@@ -686,8 +772,7 @@ fn main() {
                         };
                         st.omnibox.update_and_show(
                             st.parent_hwnd,
-                            &st.layout.topbar,
-                            st.layout.dpi_scale,
+                            &st.layout,
                             suggestions,
                         );
                     }
@@ -826,15 +911,20 @@ fn main() {
                             new_palette.bg_app.1,
                             new_palette.bg_app.2,
                         );
+                        let is_light = new_palette.is_light;
                         st.palette = new_palette.clone();
                         st.max_live_tabs = new_max;
                         st.omnibox.set_palette(new_palette);
                         for tab in &st.tab_store.tabs {
                             if let Some(ref wv) = tab.webview {
-                                engine::apply_theme_bg(wv, bg);
+                                engine::apply_theme(wv, bg, is_light);
                             }
                         }
+                        sync_all_shields(&st, false);
+                        sync_addr_bar_rect(&st);
                         drop(st);
+                        window.set_theme(Some(if is_light { Theme::Light } else { Theme::Dark }));
+                        ui::configure_borderless_frame(parent_hwnd, is_light);
                         unsafe {
                             let _ = RedrawWindow(
                                 addr_hwnd,
@@ -846,6 +936,10 @@ fn main() {
                         invalidate_chrome(parent_hwnd);
                     }
                     InternalApiEvent::ShieldsUpdated => {
+                        let st = state.borrow();
+                        sync_all_shields(&st, false);
+                        sync_addr_bar_rect(&st);
+                        drop(st);
                         invalidate_chrome(parent_hwnd);
                     }
                     InternalApiEvent::DataUpdated => {
@@ -884,13 +978,15 @@ fn begin_folder_rename(state: &Rc<RefCell<AppState>>, fid: FolderId) {
             f.collapsed = false;
         }
         let entries = st.tab_store.sidebar_entries();
-        let entry_idx = entries
-            .iter()
-            .position(|e| matches!(e, tabs::SidebarEntry::FolderHeader { folder_id, .. } if *folder_id == fid));
+        let entry_idx = {
+            let (_, tree) = ui::partition_sidebar_entries(&entries);
+            tree.iter()
+                .position(|(_, e)| matches!(e, tabs::SidebarEntry::FolderHeader { folder_id, .. } if *folder_id == fid))
+        };
         if let Some(idx) = entry_idx {
             let max_scroll =
-                ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, entries.len());
-            let row_step = ui::scale_i32(ui::TAB_ITEM_HEIGHT + 4, st.layout.dpi_scale);
+                ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, &entries);
+            let row_step = ui::scale_i32(ui::TAB_ITEM_HEIGHT + 3, st.layout.dpi_scale);
             let desired = (idx as i32) * row_step;
             st.sidebar_scroll = desired.clamp(0, max_scroll);
         }
@@ -1381,6 +1477,7 @@ fn sync_tab_navigation(
         if ui::get_address_bar_text(addr_hwnd) != target_url {
             ui::set_address_bar_text(addr_hwnd, &target_url);
         }
+        sync_addr_bar_rect(&state.borrow());
     }
     invalidate_chrome(parent_hwnd);
 }
@@ -1689,10 +1786,10 @@ fn open_new_tab(
     let init_title = match url_str {
         engine::START_URL => "Kurowser",
         engine::HISTORY_URL => "History",
-        engine::BOOKMARKS_URL => "Bookmarks",
-        engine::DOWNLOADS_URL => "Downloads",
-        engine::SETTINGS_URL => "Tema & Settings",
-        _ => "Loading…",
+        engine::BOOKMARKS_URL => "Bookmark",
+        engine::DOWNLOADS_URL => "Unduhan",
+        engine::SETTINGS_URL => "Pengaturan",
+        _ => "Memuat…",
     };
 
     let (id, bounds, browser_data, addr_hwnd, parent_hwnd) = {
@@ -1751,6 +1848,7 @@ fn open_new_tab(
     }
 
     ui::set_address_bar_text(addr_hwnd, url_str);
+    sync_addr_bar_rect(&state.borrow());
     set_window_title(parent_hwnd, init_title);
     if is_start {
         focus_address_bar(state);
@@ -1849,6 +1947,7 @@ fn switch_to_tab(
     }
 
     ui::set_address_bar_text(addr_hwnd, &url);
+    sync_addr_bar_rect(&state.borrow());
     set_window_title(parent_hwnd, &title);
     invalidate_chrome(parent_hwnd);
 }
@@ -1962,16 +2061,24 @@ fn navigate_active_tab(
     }
 
     ui::set_address_bar_text(addr_hwnd, &normalized);
+    sync_addr_bar_rect(&state.borrow());
     invalidate_chrome(parent_hwnd);
 }
 
 fn focus_address_bar(state: &Rc<RefCell<AppState>>) {
+    let (parent_hwnd, was_collapsed) = {
+        let st = state.borrow();
+        (st.parent_hwnd, !st.sidebar_expanded)
+    };
+    if was_collapsed {
+        toggle_sidebar(state, parent_hwnd);
+    }
     let addr_hwnd = state.borrow().addr_hwnd;
     unsafe {
         let _ = SetFocus(addr_hwnd);
         SendMessageW(addr_hwnd, EM_SETSEL, WPARAM(0), LPARAM(-1));
     }
-    invalidate_chrome(state.borrow().parent_hwnd);
+    invalidate_chrome(parent_hwnd);
 }
 
 fn recompute_layout_and_resize(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND) {
@@ -1983,7 +2090,7 @@ fn recompute_layout_and_resize(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND)
         ui::update_folder_rename_font(st.rename_hwnd, st.layout.dpi_scale);
         st.favicons.borrow().clear_scaled_caches();
     }
-    ui::position_address_bar(st.addr_hwnd, &st.layout.topbar, st.layout.dpi_scale);
+    sync_addr_bar_rect(&st);
 
     if let Some(fid) = st.renaming_folder {
         st.renaming_folder = None;
@@ -1991,14 +2098,18 @@ fn recompute_layout_and_resize(state: &Rc<RefCell<AppState>>, parent_hwnd: HWND)
         let _ = fid;
     }
 
-    let entry_count = st.tab_store.sidebar_entries().len();
-    let max_scroll =
-        ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, entry_count);
+    let max_scroll = {
+        let entries = st.tab_store.sidebar_entries();
+        if st.sidebar_expanded {
+            ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, &entries)
+        } else {
+            ui::max_rail_scroll(&st.layout, &entries)
+        }
+    };
     st.sidebar_scroll = st.sidebar_scroll.clamp(0, max_scroll);
 
     if st.omnibox.is_visible() {
-        st.omnibox
-            .sync_geometry(parent_hwnd, &st.layout.topbar, st.layout.dpi_scale);
+        st.omnibox.sync_geometry(parent_hwnd, &st.layout);
     }
 
     let bounds = st.layout.content_bounds();
@@ -2046,6 +2157,77 @@ unsafe extern "system" fn subclass_proc(
     let proxy = &ctx.proxy;
 
     match msg {
+        WM_NCCALCSIZE => {
+            if wparam.0 != 0 {
+                let nccsp = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
+                if IsZoomed(hwnd).as_bool() {
+                    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut mi = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+                        nccsp.rgrc[0] = mi.rcWork;
+                    }
+                } else {
+                    let dpi = GetDpiForWindow(hwnd);
+                    let pad = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                    let fx = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi) + pad;
+                    let fy = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + pad;
+                    nccsp.rgrc[0].left += fx;
+                    nccsp.rgrc[0].right -= fx;
+                    nccsp.rgrc[0].bottom -= fy;
+                }
+                return LRESULT(0);
+            }
+        }
+
+        WM_NCHITTEST => {
+            let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let def_hit = DefSubclassProc(hwnd, msg, wparam, lparam).0 as u32;
+            if def_hit != HTCLIENT {
+                return LRESULT(def_hit as isize);
+            }
+            let mut pt = POINT {
+                x: screen_x,
+                y: screen_y,
+            };
+            let _ = ScreenToClient(hwnd, &mut pt);
+            if let Ok(st) = state.try_borrow() {
+                if !st.layout.is_maximized {
+                    let top_edge = ui::scale_i32(5, st.layout.dpi_scale).max(4);
+                    let corner = ui::scale_i32(10, st.layout.dpi_scale).max(8);
+                    let w = st.layout.window.right;
+                    if pt.y < top_edge {
+                        if pt.x < corner {
+                            return LRESULT(HTTOPLEFT as isize);
+                        } else if pt.x >= w - corner {
+                            return LRESULT(HTTOPRIGHT as isize);
+                        } else {
+                            return LRESULT(HTTOP as isize);
+                        }
+                    }
+                }
+                let badge = nav_has_shield_badge(&st);
+                if ui::window_drag_area_hit(&st.layout, badge, pt.x, pt.y) {
+                    return LRESULT(HTCAPTION as isize);
+                }
+            }
+            return LRESULT(HTCLIENT as isize);
+        }
+
+        WM_NCMOUSEMOVE => {
+            if let Ok(mut st) = state.try_borrow_mut() {
+                if st.topbar_hover.is_some() || st.sidebar_hover != SidebarHit::None {
+                    st.topbar_hover = None;
+                    st.sidebar_hover = SidebarHit::None;
+                    drop(st);
+                    invalidate_chrome(hwnd);
+                }
+            }
+        }
+
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -2054,29 +2236,6 @@ unsafe extern "system" fn subclass_proc(
                 let fav_cache = st.favicons.borrow();
                 let active = st.tab_store.active_tab();
                 let active_url = active.map(|t| t.url.as_str()).unwrap_or("");
-
-                if st.sidebar_expanded {
-                    let entries = st.tab_store.sidebar_entries();
-                    let drag_target = st
-                        .sidebar_drag
-                        .and_then(|d| if d.active { d.target } else { None });
-                    ui::paint_sidebar(
-                        hdc,
-                        &st.layout.sidebar,
-                        st.layout.dpi_scale,
-                        &st.palette,
-                        &entries,
-                        st.tab_store.tabs.len(),
-                        active_url,
-                        st.tab_store.live_count(),
-                        st.max_live_tabs,
-                        st.sidebar_hover,
-                        st.sidebar_scroll,
-                        st.renaming_folder,
-                        drag_target,
-                        &fav_cache,
-                    );
-                }
 
                 let can_back = active.map(|t| t.can_go_back).unwrap_or(false);
                 let can_forward = active.map(|t| t.can_go_forward).unwrap_or(false);
@@ -2099,26 +2258,52 @@ unsafe extern "system" fn subclass_proc(
                         policy.is_active_for_site(&host)
                     }
                 };
-
-                ui::paint_topbar(
-                    hdc,
-                    &st.layout.topbar,
-                    st.layout.dpi_scale,
-                    &st.palette,
-                    st.sidebar_expanded,
+                let nav = NavVisualState {
                     can_back,
                     can_forward,
                     is_loading,
-                    st.active_bookmarked,
+                    is_bookmarked: st.active_bookmarked,
                     sec_icon,
                     shields_active,
                     blocked_count,
-                    st.topbar_hover,
-                    ui::is_address_bar_focused(st.addr_hwnd),
-                );
+                    hover: st.topbar_hover,
+                    addr_focused: ui::is_address_bar_focused(st.addr_hwnd),
+                };
 
-                if !has_wv {
-                    ui::paint_content_fallback(hdc, &st.layout.content, &st.palette);
+                ui::paint_frame_backdrop(hdc, &st.layout, &st.palette, nav, has_wv);
+
+                let entries = st.tab_store.sidebar_entries();
+                if st.sidebar_expanded {
+                    let drag_target = st
+                        .sidebar_drag
+                        .and_then(|d| if d.active { d.target } else { None });
+                    ui::paint_sidebar(
+                        hdc,
+                        &st.layout,
+                        &st.palette,
+                        nav,
+                        &entries,
+                        st.tab_store.tabs.len(),
+                        active_url,
+                        st.tab_store.live_count(),
+                        st.max_live_tabs,
+                        st.sidebar_hover,
+                        st.sidebar_scroll,
+                        st.renaming_folder,
+                        drag_target,
+                        &fav_cache,
+                    );
+                } else {
+                    ui::paint_rail(
+                        hdc,
+                        &st.layout,
+                        &st.palette,
+                        nav,
+                        &entries,
+                        st.sidebar_scroll,
+                        st.sidebar_hover,
+                        &fav_cache,
+                    );
                 }
             }
 
@@ -2148,8 +2333,7 @@ unsafe extern "system" fn subclass_proc(
         WM_MOVE => {
             if let Ok(st) = state.try_borrow() {
                 if st.omnibox.is_visible() {
-                    st.omnibox
-                        .sync_geometry(hwnd, &st.layout.topbar, st.layout.dpi_scale);
+                    st.omnibox.sync_geometry(hwnd, &st.layout);
                 }
             }
         }
@@ -2186,35 +2370,39 @@ unsafe extern "system" fn subclass_proc(
             let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             if let Ok(mut st) = state.try_borrow_mut() {
-                if st.sidebar_expanded && ui::point_in_rect(pt.x, pt.y, &st.layout.sidebar) {
-                    if st.renaming_folder.take().is_some() {
+                if ui::point_in_rect(pt.x, pt.y, &st.layout.sidebar) {
+                    if st.sidebar_expanded && st.renaming_folder.take().is_some() {
                         ui::hide_folder_rename_edit(st.rename_hwnd);
                     }
                     let entries = st.tab_store.sidebar_entries();
-                    let max_scroll = ui::max_sidebar_scroll(
-                        &st.layout.sidebar,
-                        st.layout.dpi_scale,
-                        entries.len(),
-                    );
+                    let max_scroll = if st.sidebar_expanded {
+                        ui::max_sidebar_scroll(&st.layout.sidebar, st.layout.dpi_scale, &entries)
+                    } else {
+                        ui::max_rail_scroll(&st.layout, &entries)
+                    };
                     let step = ui::scale_i32(38, st.layout.dpi_scale);
                     let steps = -(delta as f64 / WHEEL_DELTA as f64);
                     let new_scroll =
                         (st.sidebar_scroll + (steps * step as f64).round() as i32)
                             .clamp(0, max_scroll);
                     if new_scroll != st.sidebar_scroll {
-                        let layout_sidebar = st.layout.sidebar;
-                        let dpi_scale = st.layout.dpi_scale;
+                        let layout_snap = st.layout.clone();
+                        let expanded = st.sidebar_expanded;
                         drop(entries);
                         st.sidebar_scroll = new_scroll;
                         let entries_after = st.tab_store.sidebar_entries();
-                        let hover_hit = ui::hit_test_sidebar(
-                            &layout_sidebar,
-                            dpi_scale,
-                            &entries_after,
-                            new_scroll,
-                            pt.x,
-                            pt.y,
-                        );
+                        let hover_hit = if expanded {
+                            ui::hit_test_sidebar(
+                                &layout_snap.sidebar,
+                                layout_snap.dpi_scale,
+                                &entries_after,
+                                new_scroll,
+                                pt.x,
+                                pt.y,
+                            )
+                        } else {
+                            ui::hit_test_rail_tabs(&layout_snap, &entries_after, new_scroll, pt.x, pt.y)
+                        };
                         drop(entries_after);
                         st.sidebar_hover = hover_hit;
                         drop(st);
@@ -2232,11 +2420,23 @@ unsafe extern "system" fn subclass_proc(
             if let Ok(mut st) = state.try_borrow_mut() {
                 st.omnibox.hide();
 
-                if let Some(btn) = ui::hit_test_topbar(&st.layout.topbar, st.layout.dpi_scale, x, y)
-                {
+                let badge = nav_has_shield_badge(&st);
+                if let Some(btn) = ui::hit_test_topbar(&st.layout, badge, x, y) {
                     match btn {
+                        TopbarButton::WinMinimize => {
+                            let _ = proxy.send_event(AppEvent::WinMinimize);
+                        }
+                        TopbarButton::WinMaximize => {
+                            let _ = proxy.send_event(AppEvent::WinMaximizeToggle);
+                        }
+                        TopbarButton::WinClose => {
+                            let _ = proxy.send_event(AppEvent::WinClose);
+                        }
                         TopbarButton::ToggleSidebar => {
                             let _ = proxy.send_event(AppEvent::ToggleSidebar);
+                        }
+                        TopbarButton::RailSearch => {
+                            let _ = proxy.send_event(AppEvent::FocusSearchBar);
                         }
                         TopbarButton::Back => {
                             let _ = proxy.send_event(AppEvent::GoBack);
@@ -2248,7 +2448,7 @@ unsafe extern "system" fn subclass_proc(
                             let _ = proxy.send_event(AppEvent::ReloadOrStop);
                         }
                         TopbarButton::Shield => {
-                            let btns = ui::topbar_button_rects(&st.layout.topbar, st.layout.dpi_scale);
+                            let btns = ui::topbar_button_rects(&st.layout, badge);
                             let _ = proxy.send_event(AppEvent::OpenShieldsMenu {
                                 client_x: btns.shield.left,
                                 client_y: btns.shield.bottom + 4,
@@ -2260,7 +2460,24 @@ unsafe extern "system" fn subclass_proc(
                         TopbarButton::NewTab => {
                             let _ = proxy.send_event(AppEvent::NewTab(None));
                         }
+                        TopbarButton::RailSettings => {
+                            let _ =
+                                proxy.send_event(AppEvent::OpenInternalPage(engine::SETTINGS_URL));
+                        }
                     }
+                    return LRESULT(0);
+                }
+
+                if st.sidebar_expanded
+                    && ui::point_in_rect(x, y, &ui::address_bar_frame_rect(&st.layout))
+                {
+                    let addr = st.addr_hwnd;
+                    drop(st);
+                    unsafe {
+                        let _ = SetFocus(addr);
+                        SendMessageW(addr, EM_SETSEL, WPARAM(0), LPARAM(-1));
+                    }
+                    invalidate_chrome(hwnd);
                     return LRESULT(0);
                 }
 
@@ -2342,6 +2559,19 @@ unsafe extern "system" fn subclass_proc(
                         }
                         SidebarHit::None => {}
                     }
+                } else {
+                    let entries = st.tab_store.sidebar_entries();
+                    match ui::hit_test_rail_tabs(&st.layout, &entries, st.sidebar_scroll, x, y) {
+                        SidebarHit::Tab(_, id) => {
+                            let _ = proxy.send_event(AppEvent::SwitchTab(id));
+                            return LRESULT(0);
+                        }
+                        SidebarHit::FolderToggle(_, fid) => {
+                            let _ = proxy.send_event(AppEvent::ToggleFolderCollapsed(fid));
+                            return LRESULT(0);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2376,22 +2606,25 @@ unsafe extern "system" fn subclass_proc(
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             if let Ok(st) = state.try_borrow() {
-                if st.sidebar_expanded {
-                    let entries = st.tab_store.sidebar_entries();
-                    match ui::hit_test_sidebar(
+                let entries = st.tab_store.sidebar_entries();
+                let hit = if st.sidebar_expanded {
+                    ui::hit_test_sidebar(
                         &st.layout.sidebar,
                         st.layout.dpi_scale,
                         &entries,
                         st.sidebar_scroll,
                         x,
                         y,
-                    ) {
-                        SidebarHit::Tab(_, id) | SidebarHit::CloseTab(_, id) => {
-                            let _ = proxy.send_event(AppEvent::CloseTab(Some(id)));
-                            return LRESULT(0);
-                        }
-                        _ => {}
+                    )
+                } else {
+                    ui::hit_test_rail_tabs(&st.layout, &entries, st.sidebar_scroll, x, y)
+                };
+                match hit {
+                    SidebarHit::Tab(_, id) | SidebarHit::CloseTab(_, id) => {
+                        let _ = proxy.send_event(AppEvent::CloseTab(Some(id)));
+                        return LRESULT(0);
                     }
+                    _ => {}
                 }
             }
         }
@@ -2401,9 +2634,8 @@ unsafe extern "system" fn subclass_proc(
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             if let Ok(st) = state.try_borrow() {
-                if let Some(TopbarButton::Shield) =
-                    ui::hit_test_topbar(&st.layout.topbar, st.layout.dpi_scale, x, y)
-                {
+                let badge = nav_has_shield_badge(&st);
+                if let Some(TopbarButton::Shield) = ui::hit_test_topbar(&st.layout, badge, x, y) {
                     let _ = proxy.send_event(AppEvent::OpenShieldsMenu {
                         client_x: x,
                         client_y: y,
@@ -2411,36 +2643,39 @@ unsafe extern "system" fn subclass_proc(
                     return LRESULT(0);
                 }
 
-                if st.sidebar_expanded {
-                    let entries = st.tab_store.sidebar_entries();
-                    match ui::hit_test_sidebar(
+                let entries = st.tab_store.sidebar_entries();
+                let hit = if st.sidebar_expanded {
+                    ui::hit_test_sidebar(
                         &st.layout.sidebar,
                         st.layout.dpi_scale,
                         &entries,
                         st.sidebar_scroll,
                         x,
                         y,
-                    ) {
-                        SidebarHit::Tab(_, id) => {
-                            let _ = proxy.send_event(AppEvent::OpenTabContextMenu {
-                                tab_id: id,
-                                client_x: x,
-                                client_y: y,
-                            });
-                            return LRESULT(0);
-                        }
-                        SidebarHit::FolderToggle(_, fid)
-                        | SidebarHit::FolderAddTab(_, fid)
-                        | SidebarHit::FolderMenu(_, fid) => {
-                            let _ = proxy.send_event(AppEvent::OpenFolderContextMenu {
-                                fid,
-                                client_x: x,
-                                client_y: y,
-                            });
-                            return LRESULT(0);
-                        }
-                        _ => {}
+                    )
+                } else {
+                    ui::hit_test_rail_tabs(&st.layout, &entries, st.sidebar_scroll, x, y)
+                };
+                match hit {
+                    SidebarHit::Tab(_, id) => {
+                        let _ = proxy.send_event(AppEvent::OpenTabContextMenu {
+                            tab_id: id,
+                            client_x: x,
+                            client_y: y,
+                        });
+                        return LRESULT(0);
                     }
+                    SidebarHit::FolderToggle(_, fid)
+                    | SidebarHit::FolderAddTab(_, fid)
+                    | SidebarHit::FolderMenu(_, fid) => {
+                        let _ = proxy.send_event(AppEvent::OpenFolderContextMenu {
+                            fid,
+                            client_x: x,
+                            client_y: y,
+                        });
+                        return LRESULT(0);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2495,20 +2730,22 @@ unsafe extern "system" fn subclass_proc(
                     return LRESULT(0);
                 }
 
-                let new_topbar =
-                    ui::hit_test_topbar(&st.layout.topbar, st.layout.dpi_scale, x, y);
-                let new_sidebar = if st.sidebar_expanded {
+                let badge = nav_has_shield_badge(&st);
+                let new_topbar = ui::hit_test_topbar(&st.layout, badge, x, y);
+                let new_sidebar = {
                     let entries = st.tab_store.sidebar_entries();
-                    ui::hit_test_sidebar(
-                        &st.layout.sidebar,
-                        st.layout.dpi_scale,
-                        &entries,
-                        st.sidebar_scroll,
-                        x,
-                        y,
-                    )
-                } else {
-                    SidebarHit::None
+                    if st.sidebar_expanded {
+                        ui::hit_test_sidebar(
+                            &st.layout.sidebar,
+                            st.layout.dpi_scale,
+                            &entries,
+                            st.sidebar_scroll,
+                            x,
+                            y,
+                        )
+                    } else {
+                        ui::hit_test_rail_tabs(&st.layout, &entries, st.sidebar_scroll, x, y)
+                    }
                 };
 
                 if st.topbar_hover != new_topbar || st.sidebar_hover != new_sidebar {
@@ -2568,10 +2805,10 @@ fn invalidate_chrome(hwnd: HWND) {
 fn set_window_title(hwnd: HWND, page_title: &str) {
     let full = if page_title.is_empty() || page_title == "Kurowser" {
         "Kurowser".to_string()
-    } else if page_title.ends_with("— Kurowser") || page_title.ends_with("- Kurowser") {
+    } else if page_title.ends_with("- Kurowser") {
         page_title.to_string()
     } else {
-        format!("{} — Kurowser", page_title)
+        format!("{} - Kurowser", page_title)
     };
     let wide_t = ui::wide(&full);
     unsafe {
