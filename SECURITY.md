@@ -19,6 +19,9 @@ Kurowser dirancang dari awal tanpa server `localhost` HTTP lokal, sehingga selur
    - Cache domain favicon, nama file unduhan, bookmark/quick-link URL, serta data folder dari disk disanitasi terhadap *path traversal* (`..`, `/` , `\`, kontrol karakter) dan skema berbahaya.
 6. **Kurowser Shields (Ad & Tracker Blocker)**:
    - Pemblokiran domain & jalur iklan/telemetry pihak ketiga berlangsung langsung di `WebResourceRequested` sebelum permintaan jaringan keluar.
+7. **Auto-Updater Terverifikasi SHA-256 (HTTPS-Only)**:
+   - Pemeriksaan pembaruan hanya menghubungi GitHub Releases API (`https://api.github.com/repos/devkecelup/kurowser/releases/latest`) lewat `WinHTTP` TLS dengan kebijakan anti-downgrade HTTPS-ke-HTTP (`WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP`).
+   - URL unduhan harus berasal dari `https://github.com/devkecelup/kurowser/releases/download/`, file sementara divalidasi sebagai executable Windows PE (`MZ`) dalam batas ukuran aman, dan hash SHA-256 dihitung via Windows CNG (`BCrypt`) lalu dicocokkan (*constant-time*) dengan digest resmi rilis sebelum dijalankan.
 
 ## Melaporkan Kerentanan (Reporting a Vulnerability)
 

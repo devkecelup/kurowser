@@ -1,5 +1,6 @@
 // ─── storage.rs ─── Hardened settings, folders, quick links, shields, history & CSPRNG tokens ───
 use crate::adblock::{normalize_host, ShieldPolicy};
+use crate::updater::UpdateRuntimeState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -407,6 +408,8 @@ pub struct Settings {
     pub adblock_allowlist: Vec<String>,
     #[serde(default)]
     pub total_blocked_ads: u64,
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -421,6 +424,7 @@ impl Default for Settings {
             adblock_cosmetic: true,
             adblock_allowlist: Vec::new(),
             total_blocked_ads: 0,
+            auto_update: true,
         }
     }
 }
@@ -620,6 +624,7 @@ pub struct BrowserData {
     pub quick_links: Vec<QuickLinkItem>,
     pub folders: Vec<SavedFolder>,
     pub api_token: String,
+    pub update_state: UpdateRuntimeState,
     next_download_id: u64,
     unsaved_blocked_ticks: u64,
     data_dir: PathBuf,
@@ -635,6 +640,7 @@ impl Default for BrowserData {
             quick_links: default_quick_links(),
             folders: Vec::new(),
             api_token: "test_token_only".to_string(),
+            update_state: UpdateRuntimeState::Idle,
             next_download_id: 1,
             unsaved_blocked_ticks: 0,
             data_dir: std::env::temp_dir().join("KurowserTest"),
@@ -684,6 +690,7 @@ impl BrowserData {
             quick_links,
             folders,
             api_token: generate_csprng_hex(32),
+            update_state: UpdateRuntimeState::Idle,
             next_download_id,
             unsaved_blocked_ticks: 0,
             data_dir,
@@ -1217,5 +1224,12 @@ mod tests {
         assert_eq!(parsed, ThemePreset::Graphite);
         assert_eq!(ThemePreset::from_id("emerald"), ThemePreset::NordicPine);
         assert_eq!(ThemePreset::from_id("paper"), ThemePreset::Paper);
+    }
+
+    #[test]
+    fn settings_without_auto_update_default_to_true() {
+        let legacy_json = r#"{"theme_preset":"Graphite","max_live_tabs":3}"#;
+        let parsed: Settings = serde_json::from_str(legacy_json).unwrap();
+        assert!(parsed.auto_update);
     }
 }

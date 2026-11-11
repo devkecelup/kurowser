@@ -136,6 +136,8 @@ pub enum InternalApiEvent {
     SettingsUpdated,
     DataUpdated,
     ShieldsUpdated,
+    UpdateCheckRequested,
+    UpdateApplyRequested,
 }
 
 pub struct WebViewCallbacks {
@@ -1197,9 +1199,36 @@ fn handle_kurowser_request(
                     if let Some(cosmetic) = v.get("adblock_cosmetic").and_then(|x| x.as_bool()) {
                         d.settings.adblock_cosmetic = cosmetic;
                     }
+                    if let Some(auto_upd) = v.get("auto_update").and_then(|x| x.as_bool()) {
+                        d.settings.auto_update = auto_upd;
+                    }
                     d.save_settings();
                     api_event = Some(InternalApiEvent::SettingsUpdated);
                 }
+            }
+            "update/status" => {
+                let payload = browser_data
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .update_state
+                    .as_json();
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    response_json = bytes;
+                }
+            }
+            "update/check" => {
+                api_event = Some(InternalApiEvent::UpdateCheckRequested);
+                let payload = browser_data
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .update_state
+                    .as_json();
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    response_json = bytes;
+                }
+            }
+            "update/apply" => {
+                api_event = Some(InternalApiEvent::UpdateApplyRequested);
             }
             "shields/allowlist/add" => {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_str) {

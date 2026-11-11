@@ -8,6 +8,7 @@ mod pages;
 mod storage;
 mod tabs;
 mod ui;
+mod updater;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -117,6 +118,8 @@ enum AppEvent {
         ok: bool,
     },
     InternalApi(InternalApiEvent),
+    UpdateStateChanged(updater::UpdateRuntimeState),
+    ApplyUpdateAndRestart,
     Shortcut(AcceleratorAction),
     Repaint,
 }
@@ -147,6 +150,8 @@ struct AppState {
     active_bookmarked: bool,
     addr_user_editing: bool,
     tracking_mouse: bool,
+    ready_update: Option<updater::UpdateReadyInfo>,
+    relaunch_for_update: bool,
     addr_hwnd: HWND,
     rename_hwnd: HWND,
     parent_hwnd: HWND,
@@ -202,13 +207,56 @@ fn sync_all_shields(st: &AppState, reload_active: bool) {
     }
 }
 
+fn spawn_background_update_check(
+    browser_data: Arc<Mutex<BrowserData>>,
+    proxy: EventLoopProxy<AppEvent>,
+    initial_delay_ms: u64,
+) {
+    if !updater::begin_update_check_guard() {
+        return;
+    }
+    {
+        let mut d = browser_data.lock().unwrap_or_else(|e| e.into_inner());
+        d.update_state = updater::UpdateRuntimeState::Checking;
+    }
+    let _ = proxy.send_event(AppEvent::UpdateStateChanged(
+        updater::UpdateRuntimeState::Checking,
+    ));
+
+    std::thread::spawn(move || {
+        if initial_delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(initial_delay_ms));
+        }
+        updater::cleanup_old_staged_updates();
+        let p_prog = proxy.clone();
+        let bd_prog = Arc::clone(&browser_data);
+        let final_state = updater::check_and_stage_update(move |st| {
+            {
+                let mut d = bd_prog.lock().unwrap_or_else(|e| e.into_inner());
+                d.update_state = st.clone();
+            }
+            let _ = p_prog.send_event(AppEvent::UpdateStateChanged(st));
+        });
+        {
+            let mut d = browser_data.lock().unwrap_or_else(|e| e.into_inner());
+            d.update_state = final_state.clone();
+        }
+        let _ = proxy.send_event(AppEvent::UpdateStateChanged(final_state));
+        updater::end_update_check_guard();
+    });
+}
+
 fn main() {
+    if updater::maybe_handle_apply_update_cli() {
+        return;
+    }
     let _font_guard = ui::load_bundled_poppins();
 
     let initial_data = BrowserData::load();
     let initial_palette = initial_data.palette();
     let initial_sidebar = initial_data.settings.sidebar_expanded;
     let initial_max_live = initial_data.settings.max_live_tabs.clamp(2, 4);
+    let initial_auto_update = initial_data.settings.auto_update;
     let saved_folders = initial_data.folders.clone();
     let browser_data = Arc::new(Mutex::new(initial_data));
 
@@ -312,6 +360,8 @@ fn main() {
         active_bookmarked: false,
         addr_user_editing: false,
         tracking_mouse: false,
+        ready_update: None,
+        relaunch_for_update: false,
         addr_hwnd,
         rename_hwnd,
         parent_hwnd,
@@ -346,6 +396,10 @@ fn main() {
     }
     recompute_layout_and_resize(&state, parent_hwnd);
 
+    if initial_auto_update {
+        spawn_background_update_check(Arc::clone(&browser_data), proxy.clone(), 1600);
+    }
+
     let web_context = RefCell::new(web_context);
 
     event_loop.run(move |event, _, control_flow| {
@@ -370,10 +424,16 @@ fn main() {
                 {
                     let st = state.borrow();
                     save_folders_state(&st);
-                    st.browser_data
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .flush_counters();
+                    let auto_upd = {
+                        let mut d = st.browser_data.lock().unwrap_or_else(|e| e.into_inner());
+                        d.flush_counters();
+                        d.settings.auto_update
+                    };
+                    if let Some(ref ready) = st.ready_update {
+                        if st.relaunch_for_update || auto_upd {
+                            updater::spawn_apply_update(ready, st.relaunch_for_update);
+                        }
+                    }
                 }
                 *control_flow = ControlFlow::Exit;
             }
@@ -955,7 +1015,44 @@ fn main() {
                         drop(st);
                         invalidate_chrome(parent_hwnd);
                     }
+                    InternalApiEvent::UpdateCheckRequested => {
+                        spawn_background_update_check(
+                            Arc::clone(&browser_data),
+                            proxy.clone(),
+                            0,
+                        );
+                    }
+                    InternalApiEvent::UpdateApplyRequested => {
+                        let _ = proxy.send_event(AppEvent::ApplyUpdateAndRestart);
+                    }
                 },
+
+                AppEvent::UpdateStateChanged(new_state) => {
+                    let mut st = state.borrow_mut();
+                    st.ready_update = match &new_state {
+                        updater::UpdateRuntimeState::Ready(info) => Some(info.clone()),
+                        _ => None,
+                    };
+                    drop(st);
+                    invalidate_chrome(parent_hwnd);
+                }
+
+                AppEvent::ApplyUpdateAndRestart => {
+                    let has_ready = {
+                        let mut st = state.borrow_mut();
+                        if st.ready_update.is_some() {
+                            st.relaunch_for_update = true;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if has_ready {
+                        unsafe {
+                            let _ = PostMessageW(parent_hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                }
 
                 AppEvent::Shortcut(act) => {
                     handle_shortcut(&act, &state, &web_context, &proxy);
@@ -2268,6 +2365,7 @@ unsafe extern "system" fn subclass_proc(
                     blocked_count,
                     hover: st.topbar_hover,
                     addr_focused: ui::is_address_bar_focused(st.addr_hwnd),
+                    has_update: st.ready_update.is_some(),
                 };
 
                 ui::paint_frame_backdrop(hdc, &st.layout, &st.palette, nav, has_wv);

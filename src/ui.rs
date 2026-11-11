@@ -40,6 +40,7 @@ pub struct NavVisualState {
     pub blocked_count: u64,
     pub hover: Option<TopbarButton>,
     pub addr_focused: bool,
+    pub has_update: bool,
 }
 
 impl NavVisualState {
@@ -2107,8 +2108,11 @@ pub fn paint_sidebar(
                 );
             }
 
+            let is_upd_settings = hit == SidebarHit::OpenSettings && nav.has_update;
             let fg = if is_current {
                 palette.accent_text
+            } else if is_upd_settings {
+                palette.success_fg
             } else if hovered {
                 palette.text_primary
             } else {
@@ -2118,9 +2122,21 @@ pub fn paint_sidebar(
             let icon_cx = (rc.left + rc.right) / 2;
             let icon_cy = rc.top + scale_i32(15, scale);
             draw_dock_icon(mem_dc, hit, icon_cx, icon_cy, scale, rgb(fg));
+            if is_upd_settings {
+                let dr = scale_i32(5, scale).max(4);
+                draw_dot(
+                    mem_dc,
+                    icon_cx + scale_i32(6, scale),
+                    icon_cy - scale_i32(7, scale),
+                    dr,
+                    rgb(palette.success_fg),
+                    rgb(palette.success_fg),
+                );
+            }
 
             SetTextColor(mem_dc, rgb(fg));
-            let mut lbl = wide(label);
+            let display_label = if is_upd_settings { "Update!" } else { label };
+            let mut lbl = wide(display_label);
             let mut lbl_rc = RECT {
                 left: rc.left + 1,
                 top: rc.top + scale_i32(25, scale),
@@ -2852,12 +2868,25 @@ pub fn paint_rail(
             true,
             nav.hover == Some(TopbarButton::RailSettings),
             |dc, cx, cy| {
-                let col = if nav.hover == Some(TopbarButton::RailSettings) {
+                let col = if nav.has_update {
+                    palette.success_fg
+                } else if nav.hover == Some(TopbarButton::RailSettings) {
                     palette.text_primary
                 } else {
                     palette.text_muted
                 };
                 draw_dock_icon(dc, SidebarHit::OpenSettings, cx, cy, scale, rgb(col));
+                if nav.has_update {
+                    let dr = scale_i32(5, scale).max(4);
+                    draw_dot(
+                        dc,
+                        cx + scale_i32(7, scale),
+                        cy - scale_i32(7, scale),
+                        dr,
+                        rgb(palette.success_fg),
+                        rgb(palette.success_fg),
+                    );
+                }
             },
         );
 

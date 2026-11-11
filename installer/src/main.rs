@@ -18,10 +18,11 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WRITE,
-    REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WRITE, REG_DWORD,
+    REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
+use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -33,11 +34,70 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const APP_NAME: &str = "Kurowser";
-const APP_VERSION: &str = "1.0.0";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_PUBLISHER: &str = "devkecelup";
 const UNINSTALL_REG_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Kurowser";
 const APP_PATHS_REG_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\kurowser.exe";
 const WEBVIEW2_CLIENT_GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+
+fn exe_size_label() -> String {
+    let bytes = KUROWSER_EXE_BYTES.len();
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    format!("v{APP_VERSION} ({:.2} MB)", mib)
+}
+
+fn is_already_installed() -> bool {
+    default_install_dir().join("kurowser.exe").exists()
+}
+
+fn read_installed_version() -> Option<String> {
+    unsafe {
+        let wsub = wide_null(UNINSTALL_REG_KEY);
+        let mut hk = HKEY::default();
+        if !RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(wsub.as_ptr()), 0, KEY_READ, &mut hk).is_ok() {
+            return None;
+        }
+        let wname = wide_null("DisplayVersion");
+        let mut val_type = REG_VALUE_TYPE::default();
+        let mut byte_len = 0u32;
+        let query1 = RegQueryValueExW(
+            hk,
+            PCWSTR(wname.as_ptr()),
+            None,
+            Some(&mut val_type),
+            None,
+            Some(&mut byte_len),
+        );
+        if !query1.is_ok() || val_type != REG_SZ || byte_len < 2 || byte_len > 128 {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
+        let mut buf = vec![0u8; byte_len as usize];
+        let query2 = RegQueryValueExW(
+            hk,
+            PCWSTR(wname.as_ptr()),
+            None,
+            Some(&mut val_type),
+            Some(buf.as_mut_ptr()),
+            Some(&mut byte_len),
+        );
+        let _ = RegCloseKey(hk);
+        if !query2.is_ok() {
+            return None;
+        }
+        let u16s: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&ch| ch != 0)
+            .collect();
+        let ver = String::from_utf16_lossy(&u16s).trim().to_string();
+        if ver.is_empty() {
+            None
+        } else {
+            Some(ver)
+        }
+    }
+}
 
 const KUROWSER_EXE_BYTES: &[u8] = include_bytes!("../../kurowser.exe");
 const LOGO_PNG_BYTES: &[u8] = include_bytes!("../../assets/kurowser_logo.png");
@@ -59,8 +119,10 @@ struct CliOptions {
     mode: AppMode,
     silent: bool,
     desktop_shortcut: bool,
+    preserve_shortcuts: bool,
     launch_after: bool,
     purge_data: bool,
+    wait_pid: Option<u32>,
 }
 
 fn parse_cli_args<I, S>(args: I, exe_name_hint: Option<&str>) -> CliOptions
@@ -74,18 +136,41 @@ where
     };
     let mut silent = false;
     let mut desktop_shortcut = true;
+    let mut preserve_shortcuts = false;
     let mut launch_after = true;
     let mut purge_data = false;
+    let mut wait_pid: Option<u32> = None;
+    let mut expect_pid = false;
 
     for raw in args {
-        let a = raw.as_ref().trim().to_ascii_lowercase();
+        let s = raw.as_ref().trim();
+        let a = s.to_ascii_lowercase();
+        if expect_pid {
+            expect_pid = false;
+            if let Ok(pid) = a.parse::<u32>() {
+                if pid > 0 {
+                    wait_pid = Some(pid);
+                }
+            }
+            continue;
+        }
+        if let Some(pid_str) = a.strip_prefix("--wait-pid=") {
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                if pid > 0 {
+                    wait_pid = Some(pid);
+                }
+            }
+            continue;
+        }
         match a.as_str() {
             "--uninstall" | "/uninstall" | "-u" => mode = AppMode::Uninstall,
             "--install" | "/install" | "-i" => mode = AppMode::Install,
             "--silent" | "/s" | "-s" => silent = true,
             "--no-desktop" => desktop_shortcut = false,
+            "--preserve-shortcuts" => preserve_shortcuts = true,
             "--no-launch" => launch_after = false,
             "--purge-data" => purge_data = true,
+            "--wait-pid" => expect_pid = true,
             _ => {}
         }
     }
@@ -94,8 +179,10 @@ where
         mode,
         silent,
         desktop_shortcut,
+        preserve_shortcuts,
         launch_after,
         purge_data,
+        wait_pid,
     }
 }
 
@@ -317,17 +404,63 @@ fn write_uninstall_registry(install_dir: &Path, exe_path: &Path, uninstall_exe: 
     Ok(())
 }
 
+fn wait_for_pid_exit(pid: u32, timeout_ms: u32) {
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            if !handle.is_invalid() {
+                let _ = WaitForSingleObject(handle, timeout_ms);
+                let _ = CloseHandle(handle);
+            }
+        }
+    }
+}
+
 fn perform_install(opts: &CliOptions) -> Result<PathBuf, String> {
+    if let Some(pid) = opts.wait_pid {
+        if pid != std::process::id() {
+            wait_for_pid_exit(pid, 8000);
+        }
+    }
+
     let install_dir = default_install_dir();
     fs::create_dir_all(&install_dir)
         .map_err(|e| format!("Gagal membuat folder instalasi: {}", e))?;
 
     let target_exe = install_dir.join("kurowser.exe");
+
+    // If a previous install exists and the file is locked (Kurowser is open),
+    // wait briefly for graceful exit, then terminate only if still locked.
     if let Err(e) = fs::write(&target_exe, KUROWSER_EXE_BYTES) {
-        return Err(format!(
-            "Gagal menyalin kurowser.exe (pastikan Kurowser tidak sedang dibuka): {}",
-            e
-        ));
+        if target_exe.exists() {
+            let mut last_err = e.to_string();
+            let mut written = false;
+
+            for attempt in 0..4 {
+                if attempt == 1 {
+                    const CREATE_NO_WINDOW: u32 = 0x08000000;
+                    let _ = Command::new("taskkill")
+                        .args(["/F", "/IM", "kurowser.exe"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                match fs::write(&target_exe, KUROWSER_EXE_BYTES) {
+                    Ok(()) => {
+                        written = true;
+                        break;
+                    }
+                    Err(e2) => last_err = e2.to_string(),
+                }
+            }
+            if !written {
+                return Err(format!(
+                    "Gagal menyalin kurowser.exe (tutup Kurowser dan coba lagi): {}",
+                    last_err
+                ));
+            }
+        } else {
+            return Err(format!("Gagal menyalin kurowser.exe: {}", e));
+        }
     }
 
     let uninstall_exe = install_dir.join("Uninstall.exe");
@@ -340,7 +473,12 @@ fn perform_install(opts: &CliOptions) -> Result<PathBuf, String> {
     if let Some(sm) = start_menu_shortcut_path() {
         create_shortcut(&sm, &target_exe, &install_dir, "Kurowser Web Browser")?;
     }
-    if opts.desktop_shortcut {
+    let write_desktop = if opts.preserve_shortcuts {
+        desktop_shortcut_path().is_some_and(|p| p.exists())
+    } else {
+        opts.desktop_shortcut
+    };
+    if write_desktop {
         if let Some(dk) = desktop_shortcut_path() {
             create_shortcut(&dk, &target_exe, &install_dir, "Kurowser Web Browser")?;
         }
@@ -466,6 +604,8 @@ fn decode_logo_on_bg(bg: (u8, u8, u8)) -> Option<LogoBitmap> {
 struct GuiState {
     opts: CliOptions,
     webview2_ok: bool,
+    is_update: bool,
+    installed_ver: Option<String>,
     step: UiStep,
     status_msg: String,
     installed_exe: Option<PathBuf>,
@@ -622,19 +762,21 @@ unsafe fn draw_checkbox(
         bottom: by + box_sz,
     };
     let fill = if checked {
-        c_ref(129, 140, 248)
+        c_ref(15, 118, 110)
     } else {
-        c_ref(26, 27, 38)
+        c_ref(30, 36, 45)
     };
-    let border = if checked || hovered {
-        c_ref(129, 140, 248)
+    let border = if checked {
+        c_ref(20, 184, 166)
+    } else if hovered {
+        c_ref(94, 234, 212)
     } else {
-        c_ref(64, 68, 92)
+        c_ref(117, 126, 140)
     };
     draw_round_box(hdc, &b_rc, sc(5, scale), fill, border);
 
     if checked {
-        let pen = CreatePen(PS_SOLID, sc(2, scale).max(1), c_ref(15, 16, 24));
+        let pen = CreatePen(PS_SOLID, sc(2, scale).max(1), c_ref(255, 255, 255));
         let old = SelectObject(hdc, pen);
         let _ = MoveToEx(hdc, bx + sc(4, scale), by + sc(9, scale), None);
         let _ = LineTo(hdc, bx + sc(8, scale), by + sc(13, scale));
@@ -654,9 +796,9 @@ unsafe fn draw_checkbox(
         label,
         &lbl_rc,
         if hovered {
-            c_ref(248, 250, 252)
+            c_ref(242, 245, 249)
         } else {
-            c_ref(210, 214, 228)
+            c_ref(193, 201, 212)
         },
         font,
         DT_LEFT | DT_VCENTER,
@@ -674,7 +816,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
     let old_bmp = SelectObject(mem, bmp);
     SetBkMode(mem, TRANSPARENT);
 
-    let bg = CreateSolidBrush(c_ref(16, 16, 24));
+    let bg = CreateSolidBrush(c_ref(15, 18, 23));
     FillRect(mem, &cli, bg);
     let _ = DeleteObject(bg);
 
@@ -721,15 +863,26 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
         }
 
         let title_str = match (st.opts.mode, st.step) {
+            (AppMode::Install, UiStep::Done) if st.is_update => "Kurowser Diperbarui!",
             (AppMode::Install, UiStep::Done) => "Kurowser Terpasang!",
+            (AppMode::Install, _) if st.is_update => "Perbarui Kurowser",
             (AppMode::Install, _) => "Install Kurowser",
             (AppMode::Uninstall, UiStep::Done) => "Kurowser Dihapus",
             (AppMode::Uninstall, _) => "Uninstall Kurowser",
         };
+        let size_label = exe_size_label();
         let sub_str = match st.opts.mode {
-            AppMode::Install => "Browser Windows Ultra-Ringan · v1.0.0 (~1.77 MB)",
-            AppMode::Uninstall => "Menghapus aplikasi, shortcut, dan entri sistem",
+            AppMode::Install if st.is_update => {
+                if let Some(ref prev) = st.installed_ver {
+                    format!("Memperbarui v{prev} -> {size_label} · Windows x64")
+                } else {
+                    format!("Memperbarui ke {size_label} · Windows x64")
+                }
+            }
+            AppMode::Install => format!("Browser Windows · {size_label}"),
+            AppMode::Uninstall => "Menghapus aplikasi, shortcut, dan entri sistem".to_string(),
         };
+        let sub_str = sub_str.as_str();
         draw_text(
             mem,
             title_str,
@@ -739,7 +892,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
                 right: w - pad,
                 bottom: sc(50, s),
             },
-            c_ref(244, 244, 250),
+            c_ref(242, 245, 249),
             f_title,
             DT_LEFT | DT_VCENTER,
         );
@@ -752,12 +905,12 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
                 right: w - pad,
                 bottom: sc(72, s),
             },
-            c_ref(154, 158, 178),
+            c_ref(163, 173, 185),
             f_sub,
             DT_LEFT | DT_VCENTER,
         );
 
-        // Info card
+        // Info card (Graphite chrome + border_subtle)
         let card_rc = RECT {
             left: pad,
             top: sc(92, s),
@@ -768,8 +921,8 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
             mem,
             &card_rc,
             sc(12, s),
-            c_ref(23, 24, 34),
-            c_ref(44, 47, 66),
+            c_ref(22, 26, 33),
+            c_ref(47, 55, 68),
         );
 
         let dir_lbl = if st.opts.mode == AppMode::Install {
@@ -786,7 +939,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
                 right: card_rc.right - sc(16, s),
                 bottom: card_rc.top + sc(32, s),
             },
-            c_ref(154, 158, 178),
+            c_ref(163, 173, 185),
             f_small,
             DT_LEFT | DT_VCENTER,
         );
@@ -800,7 +953,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
                 right: card_rc.right - sc(16, s),
                 bottom: card_rc.top + sc(54, s),
             },
-            c_ref(228, 231, 244),
+            c_ref(242, 245, 249),
             f_body,
             DT_LEFT | DT_VCENTER | DT_PATH_ELLIPSIS,
         );
@@ -813,7 +966,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
         };
         if !st.status_msg.is_empty() {
             let col = if st.step == UiStep::Error {
-                c_ref(248, 113, 113)
+                c_ref(253, 164, 175)
             } else {
                 c_ref(110, 231, 183)
             };
@@ -827,12 +980,12 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
             let wv_txt = if st.webview2_ok {
                 "WebView2 Runtime: Terdeteksi di Windows (Siap)"
             } else {
-                "WebView2 Runtime belum terdeteksi — disarankan pasang WebView2."
+                "WebView2 Runtime belum terdeteksi; disarankan pasang WebView2."
             };
             let wv_col = if st.webview2_ok {
-                c_ref(52, 211, 153)
+                c_ref(110, 231, 183)
             } else {
-                c_ref(251, 191, 36)
+                c_ref(252, 211, 77)
             };
             let mut wv_w: Vec<u16> = OsString::from(wv_txt).encode_wide().collect();
             let old_f = SelectObject(mem, f_small);
@@ -844,7 +997,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
             let note = "Riwayat & bookmark di %LOCALAPPDATA%\\Kurowser tetap aman kecuali dicentang.";
             let mut note_w: Vec<u16> = OsString::from(note).encode_wide().collect();
             let old_f = SelectObject(mem, f_small);
-            SetTextColor(mem, c_ref(154, 158, 178));
+            SetTextColor(mem, c_ref(163, 173, 185));
             let mut r = line2_rc;
             let _ = DrawTextW(mem, &mut note_w, &mut r, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
             SelectObject(mem, old_f);
@@ -891,6 +1044,7 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
 
         let primary_lbl = match (st.opts.mode, st.step) {
             (AppMode::Install, UiStep::Done) => "Buka Kurowser Sekarang",
+            (AppMode::Install, _) if st.is_update => "Perbarui Kurowser",
             (AppMode::Install, _) => "Install Kurowser",
             (AppMode::Uninstall, UiStep::Done) => "Tutup",
             (AppMode::Uninstall, _) => "Hapus Kurowser",
@@ -898,28 +1052,29 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
         let p_fill = match (st.opts.mode, st.step) {
             (AppMode::Uninstall, UiStep::Ready) | (AppMode::Uninstall, UiStep::Error) => {
                 if st.hover == HitItem::PrimaryBtn {
-                    c_ref(239, 68, 68)
+                    c_ref(185, 28, 28)
                 } else {
                     c_ref(220, 38, 38)
                 }
             }
             _ => {
                 if st.hover == HitItem::PrimaryBtn {
-                    c_ref(147, 157, 255)
+                    c_ref(11, 93, 86)
                 } else {
-                    c_ref(129, 140, 248)
+                    c_ref(15, 118, 110)
                 }
             }
         };
-        let p_txt = if matches!(
+        let p_txt = c_ref(255, 255, 255);
+        let p_border = if matches!(
             (st.opts.mode, st.step),
             (AppMode::Uninstall, UiStep::Ready) | (AppMode::Uninstall, UiStep::Error)
         ) {
-            c_ref(255, 255, 255)
+            c_ref(251, 113, 133)
         } else {
-            c_ref(14, 15, 24)
+            c_ref(20, 184, 166)
         };
-        draw_round_box(mem, &rects.primary_btn, sc(10, s), p_fill, p_fill);
+        draw_round_box(mem, &rects.primary_btn, sc(10, s), p_fill, p_border);
         draw_text(
             mem,
             primary_lbl,
@@ -931,22 +1086,22 @@ unsafe fn paint_window(hwnd: HWND, hdc_screen: HDC) {
 
         if show_two {
             let s_fill = if st.hover == HitItem::SecondaryBtn {
-                c_ref(38, 41, 58)
+                c_ref(38, 45, 56)
             } else {
-                c_ref(26, 28, 40)
+                c_ref(30, 36, 45)
             };
             draw_round_box(
                 mem,
                 &rects.secondary_btn,
                 sc(10, s),
                 s_fill,
-                c_ref(56, 60, 82),
+                c_ref(117, 126, 140),
             );
             draw_text(
                 mem,
                 "Batal",
                 &rects.secondary_btn,
-                c_ref(210, 214, 228),
+                c_ref(242, 245, 249),
                 f_body,
                 DT_CENTER | DT_VCENTER,
             );
@@ -1094,6 +1249,9 @@ unsafe extern "system" fn wnd_proc(
                             }
                             (AppMode::Install, _) => {
                                 let launch_now = opts.launch_after;
+                                let was_update = STATE.with(|c| {
+                                    c.borrow().as_ref().map(|st| st.is_update).unwrap_or(false)
+                                });
                                 match perform_install(&opts) {
                                     Ok(exe) => {
                                         if launch_now {
@@ -1104,7 +1262,11 @@ unsafe extern "system" fn wnd_proc(
                                                 if let Some(st) = c.borrow_mut().as_mut() {
                                                     st.step = UiStep::Done;
                                                     st.installed_exe = Some(exe);
-                                                    st.status_msg = "Kurowser, shortcut Start Menu, dan entri Apps & Features berhasil dipasang.".to_string();
+                                                    st.status_msg = if was_update {
+                                                        format!("Kurowser v{APP_VERSION} berhasil diperbarui.")
+                                                    } else {
+                                                        "Kurowser, shortcut Start Menu, dan entri Apps & Features berhasil dipasang.".to_string()
+                                                    };
                                                 }
                                             });
                                             let _ = InvalidateRect(hwnd, None, false);
@@ -1163,17 +1325,25 @@ fn run_gui(opts: CliOptions) {
     }
     let _font_guard = load_poppins();
     let webview2_ok = detect_webview2_installed();
-    let logo = decode_logo_on_bg((16, 16, 24));
+    let logo = decode_logo_on_bg((15, 18, 23));
+    let is_update = opts.mode == AppMode::Install && is_already_installed();
+    let installed_ver = if is_update { read_installed_version() } else { None };
 
-    let win_title = match opts.mode {
-        AppMode::Install => w!("Kurowser Installer v1.0.0"),
-        AppMode::Uninstall => w!("Uninstall Kurowser v1.0.0"),
+    // Window title changes dynamically based on update vs fresh install.
+    // Using a stack-allocated wide string to avoid static lifetime issues.
+    let win_title_str = match opts.mode {
+        AppMode::Install if is_update => format!("Perbarui Kurowser v{APP_VERSION}\0"),
+        AppMode::Install => format!("Kurowser Installer v{APP_VERSION}\0"),
+        AppMode::Uninstall => format!("Uninstall Kurowser v{APP_VERSION}\0"),
     };
+    let win_title_wide: Vec<u16> = win_title_str.encode_utf16().collect();
 
     STATE.with(|cell| {
         *cell.borrow_mut() = Some(GuiState {
             opts,
             webview2_ok,
+            is_update,
+            installed_ver,
             step: UiStep::Ready,
             status_msg: String::new(),
             installed_exe: None,
@@ -1202,7 +1372,7 @@ fn run_gui(opts: CliOptions) {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             cls,
-            win_title,
+            PCWSTR(win_title_wide.as_ptr()),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1300,8 +1470,10 @@ mod tests {
         assert_eq!(def.mode, AppMode::Install);
         assert!(!def.silent);
         assert!(def.desktop_shortcut);
+        assert!(!def.preserve_shortcuts);
         assert!(def.launch_after);
         assert!(!def.purge_data);
+        assert_eq!(def.wait_pid, None);
 
         let silent_inst = parse_cli_args(
             ["--silent", "--no-desktop", "--no-launch"],
@@ -1312,6 +1484,19 @@ mod tests {
         assert!(!silent_inst.desktop_shortcut);
         assert!(!silent_inst.launch_after);
 
+        let auto_upd = parse_cli_args(
+            ["--silent", "--preserve-shortcuts", "--wait-pid", "4242", "--no-launch"],
+            Some("KurowserSetup.exe"),
+        );
+        assert_eq!(auto_upd.mode, AppMode::Install);
+        assert!(auto_upd.silent);
+        assert!(auto_upd.preserve_shortcuts);
+        assert!(!auto_upd.launch_after);
+        assert_eq!(auto_upd.wait_pid, Some(4242));
+
+        let eq_pid = parse_cli_args(["--wait-pid=999"], None);
+        assert_eq!(eq_pid.wait_pid, Some(999));
+
         let uninst = parse_cli_args(["/uninstall", "--silent", "--purge-data"], None);
         assert_eq!(uninst.mode, AppMode::Uninstall);
         assert!(uninst.silent);
@@ -1319,6 +1504,13 @@ mod tests {
 
         let uninst_by_name = parse_cli_args(Vec::<String>::new(), Some("Uninstall.exe"));
         assert_eq!(uninst_by_name.mode, AppMode::Uninstall);
+    }
+
+    #[test]
+    fn computes_dynamic_version_size_label() {
+        let lbl = exe_size_label();
+        assert!(lbl.starts_with(&format!("v{}", APP_VERSION)));
+        assert!(lbl.contains("MB)"));
     }
 
     #[test]

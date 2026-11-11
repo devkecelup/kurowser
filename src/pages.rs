@@ -1335,8 +1335,10 @@ pub fn render_settings_page(data: &BrowserData, csp_nonce: &str) -> String {
         "max_live_tabs": max_tabs,
         "adblock_enabled": adblock_enabled,
         "adblock_cosmetic": adblock_cosmetic,
+        "auto_update": data.settings.auto_update,
     }));
     let allowlist_json = safe_json_for_script(&data.settings.adblock_allowlist);
+    let update_json = safe_json_for_script(&data.update_state.as_json());
     let token_json = safe_json_for_script(&data.api_token);
 
     let tpl = r#"<!DOCTYPE html>
@@ -1517,6 +1519,30 @@ __HEADER__
     </div>
     <div id="allow-chips" class="allow-chips"></div>
   </div>
+
+  <h2 class="sec-title">Pembaruan Aplikasi</h2>
+  <div class="card">
+    <div class="control-row">
+      <div class="control-info">
+        <div id="lbl-autoupdate" class="row-title">Perbarui Kurowser otomatis</div>
+        <div class="row-sub">Mengunduh pembaruan resmi dari GitHub Releases secara otomatis di latar belakang (diverifikasi SHA-256) dan menerapkan saat Kurowser ditutup.</div>
+      </div>
+      <button id="toggle-autoupdate" class="switch-btn" type="button" aria-labelledby="lbl-autoupdate" aria-pressed="false">
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <div id="upd-title" class="row-title">Versi Kurowser</div>
+        <div id="upd-sub" class="row-sub">Memeriksa status pembaruan...</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="btn-check-update" class="btn btn-sm" type="button">Periksa Pembaruan</button>
+        <button id="btn-apply-update" class="btn btn-sm btn-accent" type="button" style="display:none">Perbarui &amp; Mulai Ulang</button>
+      </div>
+    </div>
+  </div>
 </main>
 <div id="toast" class="toast" role="status" aria-live="polite">Pengaturan disimpan</div>
 
@@ -1524,6 +1550,7 @@ __HEADER__
 const API_TOKEN = __TOKEN_JSON__;
 let state = __STATE_JSON__;
 let allowlist = __ALLOWLIST_JSON__;
+let updateState = __UPDATE_JSON__;
 
 const errEl = document.getElementById('api-err');
 function showErr(msg) {
@@ -1716,7 +1743,110 @@ document.getElementById('allow-form').addEventListener('submit', async e => {
   }
 });
 
+function renderUpdateUi() {
+  const autoBtn = document.getElementById('toggle-autoupdate');
+  autoBtn.classList.toggle('on', !!state.auto_update);
+  autoBtn.setAttribute('aria-pressed', String(!!state.auto_update));
+
+  const titleEl = document.getElementById('upd-title');
+  const subEl = document.getElementById('upd-sub');
+  const chkBtn = document.getElementById('btn-check-update');
+  const applyBtn = document.getElementById('btn-apply-update');
+
+  const modeLabel = updateState.installed ? 'Terinstal' : 'Portabel';
+  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.0') + ' (' + modeLabel + ')';
+
+  const st = updateState.status || 'idle';
+  applyBtn.style.display = st === 'ready' ? '' : 'none';
+  chkBtn.disabled = st === 'checking' || st === 'downloading';
+
+  if (st === 'checking') {
+    subEl.textContent = 'Memeriksa rilis terbaru di GitHub...';
+  } else if (st === 'downloading') {
+    subEl.textContent = 'Mengunduh & memverifikasi Kurowser v' + (updateState.version || '') + '...';
+  } else if (st === 'ready') {
+    subEl.textContent = 'Kurowser v' + (updateState.version || '') + ' siap (SHA-256 terverifikasi). Akan diterapkan otomatis saat ditutup atau klik tombol di kanan.';
+  } else if (st === 'up_to_date') {
+    subEl.textContent = 'Sudah menggunakan versi terbaru.';
+  } else if (st === 'failed') {
+    subEl.textContent = updateState.error || 'Gagal memeriksa pembaruan.';
+  } else {
+    subEl.textContent = 'Pembaruan resmi dicek otomatis dari GitHub Releases.';
+  }
+}
+
+let pollTimer = null;
+async function refreshUpdateStatus() {
+  try {
+    const res = await fetch('/api/update/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Kurowser-Token': API_TOKEN },
+      body: '{}'
+    });
+    if (!res.ok) return;
+    updateState = await res.json();
+    renderUpdateUi();
+    if (updateState.status === 'checking' || updateState.status === 'downloading') {
+      if (!pollTimer) {
+        pollTimer = setInterval(refreshUpdateStatus, 1100);
+      }
+    } else if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  } catch {}
+}
+
+document.getElementById('toggle-autoupdate').addEventListener('click', async () => {
+  const prev = state.auto_update;
+  state.auto_update = !prev;
+  renderUpdateUi();
+  if (!(await save(false))) {
+    state.auto_update = prev;
+    renderUpdateUi();
+  }
+});
+
+document.getElementById('btn-check-update').addEventListener('click', async () => {
+  clearErr();
+  updateState.status = 'checking';
+  renderUpdateUi();
+  try {
+    const res = await fetch('/api/update/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Kurowser-Token': API_TOKEN },
+      body: '{}'
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    updateState = await res.json();
+    renderUpdateUi();
+    if (!pollTimer) pollTimer = setInterval(refreshUpdateStatus, 1100);
+  } catch {
+    showErr('Gagal memulai pemeriksaan pembaruan.');
+  }
+});
+
+document.getElementById('btn-apply-update').addEventListener('click', async () => {
+  clearErr();
+  const btn = document.getElementById('btn-apply-update');
+  btn.disabled = true;
+  try {
+    await fetch('/api/update/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Kurowser-Token': API_TOKEN },
+      body: '{}'
+    });
+  } catch {
+    btn.disabled = false;
+    showErr('Gagal menerapkan pembaruan.');
+  }
+});
+
 renderShieldUi();
+renderUpdateUi();
+if (updateState.status === 'checking' || updateState.status === 'downloading') {
+  pollTimer = setInterval(refreshUpdateStatus, 1100);
+}
 </script></body></html>"#;
 
     tpl.replace("__CSS__", &css)
@@ -1731,6 +1861,7 @@ renderShieldUi();
         .replace("__TOKEN_JSON__", &token_json)
         .replace("__STATE_JSON__", &state_json)
         .replace("__ALLOWLIST_JSON__", &allowlist_json)
+        .replace("__UPDATE_JSON__", &update_json)
 }
 
 #[cfg(test)]

@@ -11,11 +11,11 @@
       <img src="https://img.shields.io/badge/website-Download%20Portal-0f766e?style=flat-square" alt="Download Portal" />
     </a>
     <a href="https://github.com/devkecelup/kurowser/releases/latest">
-      <img src="https://img.shields.io/badge/release-v1.0.0-334155?style=flat-square" alt="Release v1.0.0" />
+      <img src="https://img.shields.io/badge/release-v1.1.0-334155?style=flat-square" alt="Release v1.1.0" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square" alt="Windows x64" />
-    <img src="https://img.shields.io/badge/portable-1.74%20MB-10b981?style=flat-square" alt="Portable 1.74 MB" />
-    <img src="https://img.shields.io/badge/installer-2.60%20MB-14b8a6?style=flat-square" alt="Installer 2.60 MB" />
+    <img src="https://img.shields.io/badge/portable-1.83%20MB-10b981?style=flat-square" alt="Portable 1.83 MB" />
+    <img src="https://img.shields.io/badge/installer-2.73%20MB-14b8a6?style=flat-square" alt="Installer 2.73 MB" />
     <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20WebView2-f97316?style=flat-square" alt="Rust + WebView2" />
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/license-MIT-64748b?style=flat-square" alt="MIT License" />
@@ -84,6 +84,15 @@ Kurowser tidak membuka server HTTP lokal di `127.0.0.1`. Seluruh halaman interna
 
 <br />
 
+### Auto-Updater Terverifikasi SHA-256
+
+Setiap rilis baru diperiksa langsung dari GitHub Releases API (`releases/latest`) lewat `WinHTTP` TLS dengan kebijakan anti-downgrade HTTPS-ke-HTTP.
+
+- Berkas pembaruan (`KurowserSetup.exe` untuk mode terinstal atau `kurowser.exe` untuk mode portabel) diunduh ke `%LOCALAPPDATA%\Kurowser\updates\`, dipastikan valid PE (`MZ`), dan dicocokkan digest SHA-256-nya lewat Windows CNG (`BCrypt`) secara *constant-time* sebelum dijalankan.
+- Jika pembaruan siap, tombol **Setelan** di sidebar berubah menjadi **Update!** dengan indikator hijau. Anda dapat memasang langsung lewat **Perbarui & Mulai Ulang** di `kurowser://settings` atau membiarkannya terpasang otomatis saat browser ditutup (bisa dinyalakan atau dimatikan dari `kurowser://settings`).
+
+<br />
+
 ---
 
 <br />
@@ -120,7 +129,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph KU["Kurowser v1.0.0"]
+    subgraph KU["Kurowser v1.1.0"]
         K1["Host: Rust + Win32 GDI"] --> K2["Engine: WebView2 Bawaan Windows"]
         K2 --> K3["Sidebar 280px/72px + Tab Folders + Shields"]
         K3 --> K4["LRU Cap 2-4 Renderer + Skema kurowser://"]
@@ -153,16 +162,16 @@ flowchart LR
 
 ```mermaid
 xychart-beta
-    title "Jejak Ukuran Binary & Penggunaan Memori Kurowser (MB - Satuan Windows 1024x1024)"
+    title "Jejak Ukuran Binary v1.1.0 & Baseline Memori Kurowser (MB - Satuan Windows 1024x1024)"
     x-axis ["kurowser.exe", "KurowserSetup.exe", "Host Rust Private", "Host Rust Working Set", "Pohon Start Private", "Pohon Start Working Set"]
     y-axis "Megabyte (MB)" 0 --> 420
-    bar [1.74, 2.60, 6.47, 34.86, 185.87, 386.74]
+    bar [1.83, 2.73, 6.47, 34.86, 185.87, 386.74]
 ```
 
 <br />
 
 > **Catatan Pengukuran:**
-> Angka memori Kurowser di atas diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`kurowser.exe` `1.74 MB` / `1,827,328 byte`, `KurowserSetup.exe` `2.60 MB` / `2,729,984 byte`, host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
+> Ukuran binary `v1.1.0` adalah `kurowser.exe` `1.83 MB` (`1,916,416 byte`) dan `KurowserSetup.exe` `2.73 MB` (`2,859,008 byte`). Angka memori pada grafik merupakan baseline yang diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`v1.0.0`: host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
 
 <br />
 
@@ -170,7 +179,7 @@ xychart-beta
 
 <br />
 
-| Aspek | Kurowser v1.0.0 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
+| Aspek | Kurowser v1.1.0 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
 |---|---|---|---|---|---|---|---|
 | Basis engine | Microsoft Edge WebView2 OS | Chromium (bundled) | Chromium | Chromium (bundled) | Gecko (bundled) | Gecko (bundled) | Chromium (bundled) |
 | Stack UI host | Rust + Native Win32 GDI | Chromium UI | Chromium UI | Chromium UI | Gecko / XUL | Gecko / CSS Mod | Chromium + Swift / WinUI |
@@ -179,7 +188,7 @@ xychart-beta
 | Ad & tracker blocker | Kurowser Shields bawaan (ON) | Brave Shields bawaan | Tracking Prevention dasar | Ekstensi terpisah | ETP Standard | Ekstensi (seperti uBlock) | Ekstensi (seperti uBlock) |
 | Penghematan tab | Batas aktif LRU 2 sampai 4 renderer + Hemat RAM | Memory Saver | Sleeping Tabs | Memory Saver | Tab Unload otomatis | Tab Unload | Tidur otomatis |
 | Halaman internal | `kurowser://` COM di memori (tanpa localhost) | `chrome://` | `edge://` | `chrome://` | `about:` | `about:` | Skema internal |
-| Paket distribusi | Portabel `1.74 MB` atau installer `2.60 MB` | Installer + engine penuh | Bawaan Windows | Installer + engine penuh | Installer + engine penuh | Installer + engine penuh | Installer + engine penuh |
+| Paket distribusi | Portabel `1.83 MB` atau installer `2.73 MB` | Installer + engine penuh | Bawaan Windows | Installer + engine penuh | Installer + engine penuh | Installer + engine penuh | Installer + engine penuh |
 
 <br />
 
@@ -226,8 +235,8 @@ Unduh berkas rilis resmi melalui [Portal Download Kurowser](https://devkecelup.g
 
 | Berkas | Ukuran | Rincian |
 |---|---|---|
-| `KurowserSetup.exe` | `2.60 MB` | Installer Windows per-user ke `%LOCALAPPDATA%\Programs\Kurowser` tanpa hak Admin/UAC. Menambahkan shortcut Start Menu, opsi shortcut Desktop, entri `App Paths`, dan uninstaller di Apps & Features (mendukung flag `--silent` dan `--uninstall`). |
-| `kurowser.exe` | `1.74 MB` | Versi portabel satu berkas yang langsung dijalankan tanpa instalasi. |
+| `KurowserSetup.exe` | `2.73 MB` | Installer dan pembaruan Windows per-user ke `%LOCALAPPDATA%\Programs\Kurowser` tanpa hak Admin/UAC. Menambahkan shortcut Start Menu, opsi shortcut Desktop, entri `App Paths`, uninstaller di Apps & Features, serta mendukung flag `--silent`, `--preserve-shortcuts`, `--wait-pid`, dan `--uninstall`. |
+| `kurowser.exe` | `1.83 MB` | Versi portabel satu berkas yang langsung dijalankan tanpa instalasi dan mendukung pembaruan otomatis portabel. |
 
 <br />
 
@@ -244,13 +253,12 @@ Unduh berkas rilis resmi melalui [Portal Download Kurowser](https://devkecelup.g
 git clone https://github.com/devkecelup/kurowser.git
 cd kurowser
 
-# 2. Jalankan pengujian unit
+# 2. Build & test otomatis berurutan (kurowser.exe lalu KurowserSetup.exe)
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+
+# Atau jalankan manual per paket:
 cargo test --locked
-
-# 3. Build binary release teroptimasi
 cargo build --release --locked
-
-# 4. Build installer Windows native (opsional, membutuhkan kurowser.exe di root)
 Copy-Item target\release\kurowser.exe kurowser.exe -Force
 Push-Location installer
 cargo test --locked
@@ -258,7 +266,7 @@ cargo build --release --locked
 Pop-Location
 Copy-Item installer\target\release\kurowser-setup.exe KurowserSetup.exe -Force
 
-# 5. Jalankan Kurowser
+# 3. Jalankan Kurowser
 .\target\release\kurowser.exe
 ```
 
@@ -290,7 +298,8 @@ Untuk mengukur jejak memori `kurowser.exe` beserta sub-proses WebView2 saat apli
 | [`src/pages.rs`](src/pages.rs) | Templat HTML/CSS/JS halaman internal (`start`, `history`, `bookmarks`, `downloads`, `settings`) dengan ikon SVG |
 | [`src/storage.rs`](src/storage.rs) | Penyimpanan JSON persisten, pembuatan token CSPRNG (`BCryptGenRandom`), normalisasi tema, dan sanitasi input/path |
 | [`src/omnibox.rs`](src/omnibox.rs) | Mesin peringkat saran URL dan kata kunci pencarian bar alamat |
-| [`installer/src/main.rs`](installer/src/main.rs) | Installer dan uninstaller Windows native (`KurowserSetup.exe`) berbasis Win32 API dan COM ShellLink |
+| [`src/updater.rs`](src/updater.rs) | Pemeriksa rilis GitHub via WinHTTP HTTPS, verifikasi SHA-256 via Windows CNG, staging di `%LOCALAPPDATA%`, dan auto-update installer/portabel |
+| [`installer/src/main.rs`](installer/src/main.rs) | Installer, updater senyap (`--silent --preserve-shortcuts --wait-pid`), dan uninstaller Windows native (`KurowserSetup.exe`) berbasis Win32 API dan COM ShellLink |
 
 <br />
 
