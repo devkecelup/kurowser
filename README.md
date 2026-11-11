@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/badge/website-Download%20Portal-0f766e?style=flat-square" alt="Download Portal" />
     </a>
     <a href="https://github.com/devkecelup/kurowser/releases/latest">
-      <img src="https://img.shields.io/badge/release-v1.1.0-334155?style=flat-square" alt="Release v1.1.0" />
+      <img src="https://img.shields.io/badge/release-v1.1.1-334155?style=flat-square" alt="Release v1.1.1" />
     </a>
     <img src="https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square" alt="Windows x64" />
     <img src="https://img.shields.io/badge/portable-1.83%20MB-10b981?style=flat-square" alt="Portable 1.83 MB" />
@@ -41,7 +41,7 @@
 
 Kurowser menggambar jendela Win32 tanpa bingkai sistem standar dan menempatkan tombol kontrol jendela (`Minimize`, `Maximize/Restore`, `Close`) di pojok kanan atas bilah judul `36px`. Area konten WebView2 dibingkai dengan sudut membulat agar menyatu dengan latar aplikasi.
 
-- Bar alamat sekaligus pencarian terletak di dalam sidebar kiri (`280px`) yang dapat dilipat ke mode rail `72px` lewat tombol toggle atau `Ctrl + B`.
+- Secara bawaan, sidebar tampil ramping sebagai rail `50px` berisi deretan ikon tab, folder, Kurowser Shields, setelan, dan tombol tab baru. Arahkan kursor ke sidebar untuk melebarkannya ke `240px` (membuka bar pencarian dan kontrol navigasi), atau kunci posisinya lewat tombol toggle maupun `Ctrl + B`. Mode pelebaran otomatis saat hover bisa diatur di `kurowser://settings`.
 - Font Poppins (Regular, Medium, SemiBold) ditanamkan langsung ke dalam binary, didampingi ikon vektor UI dan ikon merek SVG pada halaman internal.
 - Tersedia 6 preset tema (`Graphite`, `Paper`, `Nordic Pine`, `Mist`, `Espresso`, dan `Sand`) serta pengaturan warna aksen kustom dengan penyesuaian kontras teks dan batas elemen secara otomatis.
 
@@ -129,9 +129,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph KU["Kurowser v1.1.0"]
+    subgraph KU["Kurowser v1.1.1"]
         K1["Host: Rust + Win32 GDI"] --> K2["Engine: WebView2 Bawaan Windows"]
-        K2 --> K3["Sidebar 280px/72px + Tab Folders + Shields"]
+        K2 --> K3["Rail 50px (Hover 240px) + Tab Folders + Shields"]
         K3 --> K4["LRU Cap 2-4 Renderer + Skema kurowser://"]
     end
 
@@ -162,7 +162,7 @@ flowchart LR
 
 ```mermaid
 xychart-beta
-    title "Jejak Ukuran Binary v1.1.0 & Baseline Memori Kurowser (MB - Satuan Windows 1024x1024)"
+    title "Jejak Ukuran Binary v1.1.1 & Baseline Memori Kurowser (MB - Satuan Windows 1024x1024)"
     x-axis ["kurowser.exe", "KurowserSetup.exe", "Host Rust Private", "Host Rust Working Set", "Pohon Start Private", "Pohon Start Working Set"]
     y-axis "Megabyte (MB)" 0 --> 420
     bar [1.83, 2.73, 6.47, 34.86, 185.87, 386.74]
@@ -171,7 +171,7 @@ xychart-beta
 <br />
 
 > **Catatan Pengukuran:**
-> Ukuran binary `v1.1.0` adalah `kurowser.exe` `1.83 MB` (`1,916,416 byte`) dan `KurowserSetup.exe` `2.73 MB` (`2,859,008 byte`). Angka memori pada grafik merupakan baseline yang diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`v1.0.0`: host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
+> Ukuran binary `v1.1.1` adalah `kurowser.exe` `1.83 MB` (`1,923,072 byte`) dan `KurowserSetup.exe` `2.73 MB` (`2,866,176 byte`). Angka memori pada grafik merupakan baseline yang diukur langsung di Windows memakai [`measure_memory.ps1`](measure_memory.ps1) pada sesi bersih `kurowser://start` (`v1.0.0`: host Rust `6.47 MB Private` / `34.86 MB Working Set`, serta total pohon proses bersama 6 sub-proses `msedgewebview2` sebesar `185.87 MB Private` / `386.74 MB Working Set`). Kurowser tidak mencantumkan angka RAM browser pembanding pada grafik karena pengukurannya belum dijalankan pada skenario tab yang sama di repositori ini.
 
 <br />
 
@@ -179,11 +179,11 @@ xychart-beta
 
 <br />
 
-| Aspek | Kurowser v1.1.0 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
+| Aspek | Kurowser v1.1.1 | Brave | Microsoft Edge | Google Chrome | Mozilla Firefox | Zen Browser | Arc (Windows) |
 |---|---|---|---|---|---|---|---|
 | Basis engine | Microsoft Edge WebView2 OS | Chromium (bundled) | Chromium | Chromium (bundled) | Gecko (bundled) | Gecko (bundled) | Chromium (bundled) |
 | Stack UI host | Rust + Native Win32 GDI | Chromium UI | Chromium UI | Chromium UI | Gecko / XUL | Gecko / CSS Mod | Chromium + Swift / WinUI |
-| Bilah tab utama | Sidebar kiri 280px atau rail 72px | Horizontal (opsi vertikal) | Horizontal / Tab Vertikal | Horizontal | Horizontal (opsi vertikal) | Sidebar kiri vertikal | Sidebar kiri vertikal |
+| Bilah tab utama | Rail 50px default (hover ke 240px atau pin) | Horizontal (opsi vertikal) | Horizontal / Tab Vertikal | Horizontal | Horizontal (opsi vertikal) | Sidebar kiri vertikal | Sidebar kiri vertikal |
 | Tab Folders | Ya (warna, collapse, inline rename, drag and drop) | Grup Tab | Grup Tab & Workspaces | Grup Tab | Grup Tab | Ya (Folders & Workspaces) | Ya (Spaces & Folders) |
 | Ad & tracker blocker | Kurowser Shields bawaan (ON) | Brave Shields bawaan | Tracking Prevention dasar | Ekstensi terpisah | ETP Standard | Ekstensi (seperti uBlock) | Ekstensi (seperti uBlock) |
 | Penghematan tab | Batas aktif LRU 2 sampai 4 renderer + Hemat RAM | Memory Saver | Sleeping Tabs | Memory Saver | Tab Unload otomatis | Tab Unload | Tidur otomatis |
@@ -205,7 +205,7 @@ xychart-beta
 | `Ctrl + T` | Buka tab baru (`kurowser://start`) |
 | `Ctrl + W` | Tutup tab aktif |
 | `Ctrl + L` | Fokus dan pilih teks di bar pencarian sidebar |
-| `Ctrl + B` | Lipat atau buka sidebar vertikal |
+| `Ctrl + B` | Sematkan atau lepaskan sidebar 240px dari mode rail 50px |
 | `Ctrl + D` | Simpan atau hapus bookmark halaman aktif |
 | `Ctrl + R` atau `F5` | Muat ulang halaman |
 | `Ctrl + Tab` / `Ctrl + Shift + Tab` | Pindah ke tab berikutnya atau sebelumnya |

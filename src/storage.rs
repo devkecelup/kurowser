@@ -399,7 +399,10 @@ pub struct Settings {
     pub custom_accent_hex: Option<String>,
     pub search_engine: SearchEngine,
     pub max_live_tabs: usize,
-    pub sidebar_expanded: bool,
+    #[serde(default)]
+    pub sidebar_pinned: bool,
+    #[serde(default = "default_true")]
+    pub sidebar_hover_expand: bool,
     #[serde(default = "default_true")]
     pub adblock_enabled: bool,
     #[serde(default = "default_true")]
@@ -419,7 +422,8 @@ impl Default for Settings {
             custom_accent_hex: None,
             search_engine: SearchEngine::Google,
             max_live_tabs: 3,
-            sidebar_expanded: true,
+            sidebar_pinned: false,
+            sidebar_hover_expand: true,
             adblock_enabled: true,
             adblock_cosmetic: true,
             adblock_allowlist: Vec::new(),
@@ -1228,8 +1232,10 @@ mod tests {
 
     #[test]
     fn settings_without_auto_update_default_to_true() {
-        let legacy_json = r#"{"theme_preset":"Graphite","max_live_tabs":3}"#;
+        let legacy_json = r#"{"theme_preset":"Graphite","max_live_tabs":3,"sidebar_expanded":true}"#;
         let parsed: Settings = serde_json::from_str(legacy_json).unwrap();
         assert!(parsed.auto_update);
+        assert!(!parsed.sidebar_pinned);
+        assert!(parsed.sidebar_hover_expand);
     }
 }

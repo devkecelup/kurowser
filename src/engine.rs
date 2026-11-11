@@ -1193,6 +1193,9 @@ fn handle_kurowser_request(
                     if let Some(m) = v.get("max_live_tabs").and_then(|x| x.as_u64()) {
                         d.settings.max_live_tabs = (m as usize).clamp(2, 4);
                     }
+                    if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
+                        d.settings.sidebar_hover_expand = hover_exp;
+                    }
                     if let Some(ad_on) = v.get("adblock_enabled").and_then(|x| x.as_bool()) {
                         d.settings.adblock_enabled = ad_on;
                     }

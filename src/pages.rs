@@ -1333,6 +1333,7 @@ pub fn render_settings_page(data: &BrowserData, csp_nonce: &str) -> String {
         "custom_accent_hex": data.settings.custom_accent_hex,
         "search_engine": current_search,
         "max_live_tabs": max_tabs,
+        "sidebar_hover_expand": data.settings.sidebar_hover_expand,
         "adblock_enabled": adblock_enabled,
         "adblock_cosmetic": adblock_cosmetic,
         "auto_update": data.settings.auto_update,
@@ -1483,6 +1484,16 @@ __HEADER__
         <option value="4">4 Tab (Multitasking)</option>
       </select>
     </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <div id="lbl-hover-sb" class="row-title">Melebarkan sidebar otomatis saat hover</div>
+        <div class="row-sub">Sidebar menyusut ke rail ramping secara default dan melebar saat kursor diarahkan ke kiri</div>
+      </div>
+      <button id="toggle-hover-sb" class="switch-btn" type="button" aria-labelledby="lbl-hover-sb" aria-pressed="true">
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
   </div>
 
   <h2 class="sec-title">__SVG_SHIELD__ Kurowser Shields <span id="shields-status-badge" class="status-text"></span></h2>
@@ -1564,6 +1575,14 @@ function clearErr() {
 
 document.getElementById('search-eng').value = state.search_engine;
 document.getElementById('max-tabs').value = String(state.max_live_tabs);
+
+function renderSidebarHoverUi() {
+  const btn = document.getElementById('toggle-hover-sb');
+  if (!btn) return;
+  const on = state.sidebar_hover_expand !== false;
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', String(on));
+}
 
 function showToast(msg) {
   const t = document.getElementById('toast');
@@ -1696,6 +1715,16 @@ document.getElementById('max-tabs').addEventListener('change', async e => {
   }
 });
 
+document.getElementById('toggle-hover-sb').addEventListener('click', async () => {
+  const prev = state.sidebar_hover_expand !== false;
+  state.sidebar_hover_expand = !prev;
+  renderSidebarHoverUi();
+  if (!(await save(false))) {
+    state.sidebar_hover_expand = prev;
+    renderSidebarHoverUi();
+  }
+});
+
 document.getElementById('toggle-adblock').addEventListener('click', async () => {
   const prev = state.adblock_enabled;
   state.adblock_enabled = !prev;
@@ -1754,7 +1783,7 @@ function renderUpdateUi() {
   const applyBtn = document.getElementById('btn-apply-update');
 
   const modeLabel = updateState.installed ? 'Terinstal' : 'Portabel';
-  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.0') + ' (' + modeLabel + ')';
+  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.1') + ' (' + modeLabel + ')';
 
   const st = updateState.status || 'idle';
   applyBtn.style.display = st === 'ready' ? '' : 'none';
@@ -1842,6 +1871,7 @@ document.getElementById('btn-apply-update').addEventListener('click', async () =
   }
 });
 
+renderSidebarHoverUi();
 renderShieldUi();
 renderUpdateUi();
 if (updateState.status === 'checking' || updateState.status === 'downloading') {

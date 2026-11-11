@@ -22,8 +22,8 @@ use crate::tabs::{FolderId, SidebarEntry, TabId};
 
 // ── Layout constants (logical px at 96 DPI) ──
 pub const TOPBAR_HEIGHT: i32 = 36;
-pub const SIDEBAR_WIDTH: i32 = 280;
-pub const COLLAPSED_RAIL_WIDTH: i32 = 72;
+pub const SIDEBAR_WIDTH: i32 = 240;
+pub const COLLAPSED_RAIL_WIDTH: i32 = 50;
 pub const FRAME_PAD: i32 = 8;
 pub const FRAME_CORNER_D: i32 = 16;
 pub const TAB_ITEM_HEIGHT: i32 = 34;
@@ -41,6 +41,7 @@ pub struct NavVisualState {
     pub hover: Option<TopbarButton>,
     pub addr_focused: bool,
     pub has_update: bool,
+    pub sidebar_pinned: bool,
 }
 
 impl NavVisualState {
@@ -153,6 +154,8 @@ pub enum AddrBarEvent {
     Escape,
     OmniboxKey(OmniboxNavKey),
     FocusChanged(bool),
+    HoverInside,
+    HoverLeave,
     Shortcut(AcceleratorAction),
     Repaint,
 }
@@ -1165,7 +1168,7 @@ fn sidebar_geometry(
     let new_top = url_pill.bottom + scale_i32(8, scale);
     let new_h = scale_i32(32, scale);
     let cta_gap = scale_i32(6, scale);
-    let folder_w = scale_i32(84, scale);
+    let folder_w = scale_i32(76, scale);
     let avail_cta = (right - left).max(scale_i32(120, scale));
     let tab_w = (avail_cta - folder_w - cta_gap).max(scale_i32(72, scale));
 
@@ -1213,7 +1216,7 @@ fn sidebar_geometry(
     let footer_top = (rect.bottom - footer_h).max(rect.top + scale_i32(180, scale));
 
     let trim_btn = RECT {
-        left: right - scale_i32(90, scale),
+        left: right - scale_i32(84, scale),
         top: footer_top + scale_i32(5, scale),
         right,
         bottom: rect.bottom - scale_i32(5, scale),
@@ -1432,7 +1435,21 @@ pub fn paint_sidebar(
             true,
             nav.hover == Some(TopbarButton::ToggleSidebar),
             |dc, cx, cy| {
-                draw_sidebar_toggle_icon(dc, cx, cy, scale, true, rgb(palette.accent_text))
+                let col = if nav.sidebar_pinned {
+                    palette.accent_text
+                } else if nav.hover == Some(TopbarButton::ToggleSidebar) {
+                    palette.text_primary
+                } else {
+                    palette.text_muted
+                };
+                draw_sidebar_toggle_icon(
+                    dc,
+                    cx,
+                    cy,
+                    scale,
+                    nav.sidebar_pinned,
+                    rgb(col),
+                )
             },
         );
         draw_nav_button(
@@ -1548,7 +1565,7 @@ pub fn paint_sidebar(
         );
         draw_folder_glyph(
             mem_dc,
-            g.new_folder_btn.left + scale_i32(11, scale),
+            g.new_folder_btn.left + scale_i32(9, scale),
             (g.new_folder_btn.top + g.new_folder_btn.bottom) / 2 - scale_i32(6, scale),
             scale_i32(13, scale),
             rgb(if folder_hover { palette.accent_text } else { fb_txt }),
@@ -1558,9 +1575,9 @@ pub fn paint_sidebar(
         SetTextColor(mem_dc, rgb(fb_txt));
         let mut fld_lbl = wide("Folder");
         let mut fld_lbl_rc = RECT {
-            left: g.new_folder_btn.left + scale_i32(28, scale),
+            left: g.new_folder_btn.left + scale_i32(25, scale),
             top: g.new_folder_btn.top,
-            right: g.new_folder_btn.right - scale_i32(6, scale),
+            right: g.new_folder_btn.right - scale_i32(5, scale),
             bottom: g.new_folder_btn.bottom,
         };
         DrawTextW(
@@ -2405,11 +2422,11 @@ unsafe fn draw_caption_button(
     }
 }
 
-// ── Double-Buffered 72px Collapsed Icon Rail ──
+// ── Double-Buffered 50px Slim Collapsed Icon Rail ──
 
 fn rail_list_bounds(rect: &RECT, scale: f64, btns: &TopbarButtons) -> (i32, i32) {
-    let list_top = (btns.new_tab.bottom + scale_i32(8, scale)).max(rect.top);
-    let list_bottom = (btns.star.top - scale_i32(8, scale)).max(list_top);
+    let list_top = (btns.rail_search.bottom + scale_i32(12, scale)).max(rect.top);
+    let list_bottom = (btns.shield.top - scale_i32(12, scale)).max(list_top);
     (list_top, list_bottom)
 }
 
@@ -2447,7 +2464,7 @@ pub fn hit_test_rail_tabs(
         return SidebarHit::None;
     }
 
-    let tile_w = scale_i32(48, scale).min((layout.sidebar.right - layout.sidebar.left - 8).max(24));
+    let tile_w = scale_i32(36, scale).min((layout.sidebar.right - layout.sidebar.left - 8).max(24));
     let tile_h = scale_i32(34, scale);
     let gap = scale_i32(4, scale);
     let tile_left = layout.sidebar.left + ((layout.sidebar.right - layout.sidebar.left - tile_w) / 2);
@@ -2524,11 +2541,16 @@ pub fn paint_rail(
             true,
             nav.hover == Some(TopbarButton::ToggleSidebar),
             |dc, cx, cy| {
-                draw_sidebar_toggle_icon(dc, cx, cy, scale, false, rgb(palette.accent_text))
+                let col = if nav.hover == Some(TopbarButton::ToggleSidebar) {
+                    palette.text_primary
+                } else {
+                    palette.text_muted
+                };
+                draw_sidebar_toggle_icon(dc, cx, cy, scale, false, rgb(col))
             },
         );
 
-        // Mini Search Pill trigger
+        // Mini Search Pill trigger (click or Ctrl+L to expand & type URL)
         let srch_hov = nav.hover == Some(TopbarButton::RailSearch);
         draw_rounded_fill(
             mem_dc,
@@ -2545,116 +2567,21 @@ pub fn paint_rail(
             rgb(if srch_hov { palette.accent_text } else { palette.text_muted }),
         );
 
-        draw_nav_button(
-            mem_dc,
-            &btns.back,
-            scale,
-            palette,
-            nav.can_back,
-            nav.hover == Some(TopbarButton::Back),
-            |dc, cx, cy| {
-                let col = if nav.can_back {
-                    palette.text_primary
-                } else {
-                    palette.text_disabled
-                };
-                draw_arrow_icon(dc, cx, cy, scale, true, rgb(col));
-            },
-        );
-        draw_nav_button(
-            mem_dc,
-            &btns.forward,
-            scale,
-            palette,
-            nav.can_forward,
-            nav.hover == Some(TopbarButton::Forward),
-            |dc, cx, cy| {
-                let col = if nav.can_forward {
-                    palette.text_primary
-                } else {
-                    palette.text_disabled
-                };
-                draw_arrow_icon(dc, cx, cy, scale, false, rgb(col));
-            },
-        );
-        draw_nav_button(
-            mem_dc,
-            &btns.reload,
-            scale,
-            palette,
-            true,
-            nav.hover == Some(TopbarButton::ReloadOrStop),
-            |dc, cx, cy| {
-                if nav.is_loading {
-                    draw_close_x(
-                        dc,
-                        cx,
-                        cy,
-                        scale_i32(5, scale),
-                        rgb(palette.danger_fg),
-                        scale,
-                    );
-                } else {
-                    draw_reload_icon(dc, cx, cy, scale, rgb(palette.text_primary));
-                }
-            },
-        );
-
-        if nav.hover == Some(TopbarButton::Shield) {
-            draw_rounded_fill(
-                mem_dc,
-                &btns.shield,
-                scale_i32(7, scale),
-                rgb(palette.bg_hover),
-                rgb(palette.border_subtle),
-            );
-        }
-        let font_badge = create_font(scale, 10, FW_SEMIBOLD.0 as i32);
-        draw_shield_button_glyph(
-            mem_dc,
-            &btns.shield,
-            scale,
-            palette,
-            nav.shields_active,
-            nav.blocked_count,
-            nav.sec_icon == SecurityIcon::Internal,
-            font_badge,
-            favicons,
-        );
-        let _ = DeleteObject(font_badge);
-
-        // Divider above "+ New Tab"
-        let div_y = btns.shield.bottom + scale_i32(7, scale);
-        let div_rc = RECT {
-            left: scale_i32(14, scale),
-            top: div_y,
-            right: width - scale_i32(14, scale),
-            bottom: div_y + 1,
+        // Top hairline divider above favicons strip
+        let top_div_y = btns.rail_search.bottom + scale_i32(6, scale);
+        let top_div = RECT {
+            left: scale_i32(10, scale),
+            top: top_div_y,
+            right: width - scale_i32(10, scale),
+            bottom: top_div_y + 1,
         };
-        let div_br = CreateSolidBrush(rgb(palette.border_subtle));
-        FillRect(mem_dc, &div_rc, div_br);
-        let _ = DeleteObject(div_br);
-
-        let nt_hov = nav.hover == Some(TopbarButton::NewTab);
-        draw_rounded_fill(
-            mem_dc,
-            &btns.new_tab,
-            scale_i32(8, scale),
-            rgb(if nt_hov { palette.accent_soft } else { palette.bg_surface }),
-            rgb(if nt_hov { palette.accent } else { palette.border }),
-        );
-        draw_plus_icon(
-            mem_dc,
-            (btns.new_tab.left + btns.new_tab.right) / 2,
-            (btns.new_tab.top + btns.new_tab.bottom) / 2,
-            scale_i32(5, scale),
-            rgb(palette.accent_text),
-            scale,
-        );
+        let tdiv_br = CreateSolidBrush(rgb(palette.border_subtle));
+        FillRect(mem_dc, &top_div, tdiv_br);
+        let _ = DeleteObject(tdiv_br);
 
         // Scrollable favicon & folder strip
         let (list_top, list_bottom) = rail_list_bounds(&local, scale, &btns);
-        let tile_w = scale_i32(48, scale).min((width - 8).max(24));
+        let tile_w = scale_i32(36, scale).min((width - 8).max(24));
         let tile_h = scale_i32(34, scale);
         let gap = scale_i32(4, scale);
         let tile_left = (width - tile_w) / 2;
@@ -2704,15 +2631,15 @@ pub fn paint_rail(
                             rgb(palette.border_subtle),
                         );
                     }
-                    let fld_sz = scale_i32(15, scale);
-                    let fld_x = (tile_rc.left + tile_rc.right - fld_sz) / 2 - scale_i32(3, scale);
+                    let fld_sz = scale_i32(14, scale);
+                    let fld_x = tile_rc.left + scale_i32(6, scale);
                     let fld_y = tile_rc.top + (tile_h - fld_sz) / 2;
                     draw_folder_glyph(mem_dc, fld_x, fld_y, fld_sz, rgb(*color), !*collapsed);
                     draw_chevron(
                         mem_dc,
                         fld_x + fld_sz + scale_i32(5, scale),
                         tile_rc.top + tile_h / 2,
-                        scale * 0.85,
+                        scale * 0.8,
                         *collapsed,
                         rgb(if is_hov { palette.text_primary } else { palette.text_muted }),
                     );
@@ -2726,9 +2653,9 @@ pub fn paint_rail(
                         );
                         let gbr = CreateSolidBrush(rgb(guide_col));
                         let guide = RECT {
-                            left: scale_i32(5, scale),
+                            left: scale_i32(3, scale),
                             top: y - (gap / 2),
-                            right: scale_i32(7, scale),
+                            right: scale_i32(5, scale),
                             bottom: y + tile_h + (gap / 2) + 1,
                         };
                         FillRect(mem_dc, &guide, gbr);
@@ -2747,10 +2674,10 @@ pub fn paint_rail(
                         let bar_col = tab.folder_color.unwrap_or(palette.accent);
                         let abr = CreateSolidBrush(rgb(bar_col));
                         let bar = RECT {
-                            left: tile_rc.left + scale_i32(2, scale),
-                            top: tile_rc.top + scale_i32(7, scale),
-                            right: tile_rc.left + scale_i32(5, scale),
-                            bottom: tile_rc.bottom - scale_i32(7, scale),
+                            left: tile_rc.left + scale_i32(1, scale),
+                            top: tile_rc.top + scale_i32(8, scale),
+                            right: tile_rc.left + scale_i32(3, scale),
+                            bottom: tile_rc.bottom - scale_i32(8, scale),
                         };
                         FillRect(mem_dc, &bar, abr);
                         let _ = DeleteObject(abr);
@@ -2812,54 +2739,50 @@ pub fn paint_rail(
             let thumb_y =
                 list_top + ((scroll as f64 / max_scroll as f64) * track_avail as f64).round() as i32;
             let sb_rect = RECT {
-                left: width - scale_i32(4, scale),
+                left: width - scale_i32(3, scale),
                 top: thumb_y,
                 right: width - scale_i32(1, scale),
                 bottom: thumb_y + thumb_h,
             };
-            draw_rounded_fill(mem_dc, &sb_rect, 3, rgb(palette.border), rgb(palette.border));
+            draw_rounded_fill(mem_dc, &sb_rect, 2, rgb(palette.border), rgb(palette.border));
         }
 
         let _ = RestoreDC(mem_dc, saved);
         let _ = DeleteObject(font_small);
 
-        // Bottom quick controls (Bookmark Star + Settings)
-        let bot_div = RECT {
-            left: scale_i32(14, scale),
-            top: btns.star.top - scale_i32(6, scale),
-            right: width - scale_i32(14, scale),
-            bottom: btns.star.top - scale_i32(5, scale),
+        // Upper bottom hairline divider above Shields & Settings
+        let bot_div1 = RECT {
+            left: scale_i32(10, scale),
+            top: btns.shield.top - scale_i32(6, scale),
+            right: width - scale_i32(10, scale),
+            bottom: btns.shield.top - scale_i32(5, scale),
         };
         let bdiv_br = CreateSolidBrush(rgb(palette.border_subtle));
-        FillRect(mem_dc, &bot_div, bdiv_br);
-        let _ = DeleteObject(bdiv_br);
+        FillRect(mem_dc, &bot_div1, bdiv_br);
 
-        draw_nav_button(
+        if nav.hover == Some(TopbarButton::Shield) {
+            draw_rounded_fill(
+                mem_dc,
+                &btns.shield,
+                scale_i32(7, scale),
+                rgb(palette.bg_hover),
+                rgb(palette.border_subtle),
+            );
+        }
+        let font_badge = create_font(scale, 10, FW_SEMIBOLD.0 as i32);
+        draw_shield_button_glyph(
             mem_dc,
-            &btns.star,
+            &btns.shield,
             scale,
             palette,
-            true,
-            nav.hover == Some(TopbarButton::BookmarkStar),
-            |dc, cx, cy| {
-                let col = if nav.is_bookmarked {
-                    rgb(palette.warning_fg)
-                } else if nav.hover == Some(TopbarButton::BookmarkStar) {
-                    rgb(palette.text_primary)
-                } else {
-                    rgb(palette.text_muted)
-                };
-                draw_star_icon(
-                    dc,
-                    cx,
-                    cy,
-                    scale_i32(6, scale).max(5) as f64,
-                    nav.is_bookmarked,
-                    col,
-                    scale,
-                );
-            },
+            nav.shields_active,
+            nav.blocked_count,
+            nav.sec_icon == SecurityIcon::Internal,
+            font_badge,
+            favicons,
         );
+        let _ = DeleteObject(font_badge);
+
         draw_nav_button(
             mem_dc,
             &btns.rail_settings,
@@ -2887,6 +2810,34 @@ pub fn paint_rail(
                         rgb(palette.success_fg),
                     );
                 }
+            },
+        );
+
+        // Lower hairline divider above "+" New Tab at bottom
+        let bot_div2 = RECT {
+            left: scale_i32(10, scale),
+            top: btns.new_tab.top - scale_i32(6, scale),
+            right: width - scale_i32(10, scale),
+            bottom: btns.new_tab.top - scale_i32(5, scale),
+        };
+        FillRect(mem_dc, &bot_div2, bdiv_br);
+        let _ = DeleteObject(bdiv_br);
+
+        let nt_hov = nav.hover == Some(TopbarButton::NewTab);
+        draw_nav_button(
+            mem_dc,
+            &btns.new_tab,
+            scale,
+            palette,
+            true,
+            nt_hov,
+            |dc, cx, cy| {
+                let col = if nt_hov {
+                    palette.accent_text
+                } else {
+                    palette.text_primary
+                };
+                draw_plus_icon(dc, cx, cy, scale_i32(5, scale), rgb(col), scale);
             },
         );
 
@@ -3243,7 +3194,7 @@ unsafe fn draw_shield_button_glyph(
     favicons: &FaviconCache,
 ) {
     let w = rc.right - rc.left;
-    let compact = w < scale_i32(34, scale);
+    let compact = w < scale_i32(38, scale);
     let has_badge = blocked_count > 0 && shields_active && !is_internal;
     let ico_sz = scale_i32(16, scale).max(12);
     let ico_x = if !compact && has_badge {
@@ -3569,74 +3520,48 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
     }
 
     let sb = &layout.sidebar;
-    let rail_w = (sb.right - sb.left).max(52);
-    let full_pad = scale_i32(8, scale).min((rail_w - 24) / 2).max(2);
-    let full_l = sb.left + full_pad;
-    let full_r = sb.right - full_pad;
+    let rail_w = (sb.right - sb.left).max(40);
+    let col_w = scale_i32(34, scale).min((rail_w - 6).max(24));
+    let col_l = sb.left + (rail_w - col_w) / 2;
+    let col_r = col_l + col_w;
 
     let toggle = RECT {
-        left: full_l,
+        left: col_l,
         top: sb.top + scale_i32(8, scale),
-        right: full_r,
+        right: col_r,
         bottom: sb.top + scale_i32(36, scale),
     };
     let rail_search = RECT {
-        left: full_l,
+        left: col_l,
         top: toggle.bottom + scale_i32(5, scale),
-        right: full_r,
+        right: col_r,
         bottom: toggle.bottom + scale_i32(33, scale),
     };
 
-    let pair_sz = scale_i32(26, scale);
-    let pair_gap = scale_i32(4, scale);
-    let pair_x0 = sb.left + (rail_w - (pair_sz * 2 + pair_gap)) / 2;
-    let row_d_y = rail_search.bottom + scale_i32(8, scale);
-    let back = RECT {
-        left: pair_x0,
-        top: row_d_y,
-        right: pair_x0 + pair_sz,
-        bottom: row_d_y + pair_sz,
-    };
-    let forward = RECT {
-        left: back.right + pair_gap,
-        top: row_d_y,
-        right: back.right + pair_gap + pair_sz,
-        bottom: row_d_y + pair_sz,
-    };
-
-    let row_e_y = back.bottom + scale_i32(4, scale);
-    let reload = RECT {
-        left: pair_x0,
-        top: row_e_y,
-        right: pair_x0 + pair_sz,
-        bottom: row_e_y + pair_sz,
-    };
-    let shield = RECT {
-        left: reload.right + pair_gap,
-        top: row_e_y,
-        right: reload.right + pair_gap + pair_sz,
-        bottom: row_e_y + pair_sz,
-    };
+    let btn_h = scale_i32(26, scale);
+    let nt_h = scale_i32(30, scale);
+    let min_list_top = rail_search.bottom + scale_i32(12, scale);
+    let bottom_edge = (sb.bottom - scale_i32(8, scale)).max(
+        min_list_top + scale_i32(50, scale) + nt_h + btn_h * 2 + scale_i32(27, scale),
+    );
 
     let new_tab = RECT {
-        left: full_l,
-        top: shield.bottom + scale_i32(15, scale),
-        right: full_r,
-        bottom: shield.bottom + scale_i32(45, scale),
-    };
-
-    let bot_y = (sb.bottom - scale_i32(38, scale)).max(new_tab.bottom + scale_i32(16, scale));
-    let star = RECT {
-        left: pair_x0,
-        top: bot_y,
-        right: pair_x0 + pair_sz,
-        bottom: bot_y + pair_sz,
+        left: col_l,
+        top: bottom_edge - nt_h,
+        right: col_r,
+        bottom: bottom_edge,
     };
     let rail_settings = RECT {
-        left: star.right + pair_gap,
-        top: bot_y,
-        right: star.right + pair_gap + pair_sz,
-        bottom: bot_y + pair_sz,
+        left: col_l,
+        top: new_tab.top - scale_i32(11, scale) - btn_h,
+        right: col_r,
+        bottom: new_tab.top - scale_i32(11, scale),
+    };
+    let shield = RECT {
+        left: col_l,
+        top: rail_settings.top - scale_i32(4, scale) - btn_h,
+        right: col_r,
+        bottom: rail_settings.top - scale_i32(4, scale),
     };
 
     TopbarButtons {
@@ -3645,11 +3570,11 @@ pub fn topbar_button_rects(layout: &Layout, has_shield_badge: bool) -> TopbarBut
         win_close,
         toggle,
         rail_search,
-        back,
-        forward,
-        reload,
+        back: RECT::default(),
+        forward: RECT::default(),
+        reload: RECT::default(),
         shield,
-        star,
+        star: RECT::default(),
         new_tab,
         rail_settings,
     }
@@ -3873,6 +3798,7 @@ const ADDR_SUBCLASS_ID: usize = 200;
 struct AddrSubclassData {
     on_event: Box<dyn Fn(AddrBarEvent) + 'static>,
     select_all_on_up: bool,
+    mouse_inside: bool,
 }
 
 thread_local! {
@@ -3918,6 +3844,7 @@ pub fn create_address_bar(
         let data = Box::new(AddrSubclassData {
             on_event: Box::new(on_event),
             select_all_on_up: false,
+            mouse_inside: false,
         });
         let raw = Box::into_raw(data) as usize;
         let _ = SetWindowSubclass(hwnd, Some(address_bar_subclass_proc), ADDR_SUBCLASS_ID, raw);
@@ -3951,6 +3878,26 @@ unsafe extern "system" fn address_bar_subclass_proc(
     let data = &mut *(ref_data as *mut AddrSubclassData);
 
     match msg {
+        WM_MOUSEMOVE => {
+            if !data.mouse_inside {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                if TrackMouseEvent(&mut tme).is_ok() {
+                    data.mouse_inside = true;
+                }
+                (data.on_event)(AddrBarEvent::HoverInside);
+            }
+        }
+
+        WM_MOUSELEAVE => {
+            data.mouse_inside = false;
+            (data.on_event)(AddrBarEvent::HoverLeave);
+        }
+
         WM_LBUTTONDOWN => {
             if GetFocus() != hwnd {
                 data.select_all_on_up = true;
@@ -4122,7 +4069,7 @@ pub fn position_address_bar(addr_hwnd: HWND, layout: &Layout, has_shield_badge: 
     let scale = layout.dpi_scale;
     let frame = address_bar_frame_rect(layout);
     let btns = topbar_button_rects(layout, has_shield_badge);
-    let edit_left = frame.left + scale_i32(27, scale);
+    let edit_left = frame.left + scale_i32(25, scale);
     let edit_right = (btns.shield.left - scale_i32(4, scale)).max(edit_left + 20);
     let width = (edit_right - edit_left).max(20);
     let edit_h = scale_i32(22, scale).max(16);
@@ -4982,40 +4929,41 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_rail_is_72px_with_top_right_captions_and_clean_tiles() {
-        for &(w, h) in &[(1180, 760), (560, 380)] {
-            let layout = Layout::compute_with_metrics(w, h, 1.0, false, false);
-            assert_eq!(layout.topbar.bottom, scale_i32(TOPBAR_HEIGHT, 1.0));
-            assert_eq!(layout.sidebar.right, COLLAPSED_RAIL_WIDTH);
-            assert_eq!(layout.content.left, COLLAPSED_RAIL_WIDTH + FRAME_PAD);
+    fn collapsed_rail_is_50px_with_top_right_captions_and_clean_tiles() {
+        for &(w, h, scale) in &[(1180, 760, 1.0), (560, 380, 1.0), (1475, 950, 1.25)] {
+            let layout = Layout::compute_with_metrics(w, h, scale, false, false);
+            let expected_rail = scale_i32(COLLAPSED_RAIL_WIDTH, scale);
+            assert_eq!(layout.topbar.bottom, scale_i32(TOPBAR_HEIGHT, scale));
+            assert_eq!(layout.sidebar.right, expected_rail);
+            assert_eq!(layout.content.left, expected_rail + scale_i32(FRAME_PAD, scale));
             assert!(address_bar_frame_rect(&layout).right == 0);
 
             let b = topbar_button_rects(&layout, true);
             for cap in [b.win_min, b.win_max, b.win_close] {
-                assert!(cap.left >= COLLAPSED_RAIL_WIDTH);
+                assert!(cap.left >= expected_rail);
                 assert!(cap.right <= layout.window.right);
                 assert!(cap.bottom <= layout.content.top);
             }
+            assert_eq!(b.back.right, 0);
+            assert_eq!(b.forward.right, 0);
+            assert_eq!(b.reload.right, 0);
+            assert_eq!(b.star.right, 0);
             let rail_btns = [
                 b.toggle,
                 b.rail_search,
-                b.back,
-                b.forward,
-                b.reload,
                 b.shield,
-                b.new_tab,
-                b.star,
                 b.rail_settings,
+                b.new_tab,
             ];
             for i in 0..rail_btns.len() {
-                assert!(rail_btns[i].left >= 0 && rail_btns[i].right <= COLLAPSED_RAIL_WIDTH);
+                assert!(rail_btns[i].left >= 0 && rail_btns[i].right <= expected_rail);
                 assert!(rail_btns[i].top >= 0 && rail_btns[i].bottom <= h);
                 for j in (i + 1)..rail_btns.len() {
                     assert!(!rects_overlap(&rail_btns[i], &rail_btns[j]));
                 }
             }
-            let (ltop, lbot) = rail_list_bounds(&layout.sidebar, 1.0, &b);
-            assert!(lbot > ltop + 80);
+            let (ltop, lbot) = rail_list_bounds(&layout.sidebar, scale, &b);
+            assert!(lbot > ltop + scale_i32(80, scale));
         }
     }
 
