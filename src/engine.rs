@@ -85,7 +85,7 @@ const EMPTY_PNG_1X1: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
-const BROWSER_ARGS: &str = "\
+const BASE_BROWSER_ARGS: &str = "\
     --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
     --autoplay-policy=user-gesture-required \
     --process-per-site \
@@ -93,6 +93,17 @@ const BROWSER_ARGS: &str = "\
     --disable-component-update \
     --disable-domain-reliability \
     --no-pings";
+
+pub fn build_browser_args(js_heap_limit_mb: u32) -> String {
+    if js_heap_limit_mb == 0 {
+        return BASE_BROWSER_ARGS.to_string();
+    }
+    let capped = js_heap_limit_mb.clamp(128, 4096);
+    format!(
+        "{} --js-flags=--max-old-space-size={}",
+        BASE_BROWSER_ARGS, capped
+    )
+}
 
 static REGISTER_CONTAINER_CLASS: Once = Once::new();
 
@@ -285,7 +296,7 @@ fn web_context_dir() -> PathBuf {
         .join("WebView2Data")
 }
 
-pub fn create_web_context() -> WebContext {
+pub fn create_web_context(js_heap_limit_mb: u32) -> WebContext {
     let dir = web_context_dir();
     let _ = std::fs::create_dir_all(&dir);
 
@@ -301,9 +312,10 @@ pub fn create_web_context() -> WebContext {
     }
     let scheme_iface: ICoreWebView2CustomSchemeRegistration = scheme.into();
 
+    let browser_args = build_browser_args(js_heap_limit_mb);
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
-        options.set_additional_browser_arguments(BROWSER_ARGS.to_string());
+        options.set_additional_browser_arguments(browser_args);
         options.set_enable_tracking_prevention(true);
         options.set_are_browser_extensions_enabled(false);
         options.set_is_custom_crash_reporting_enabled(false);
@@ -1229,6 +1241,13 @@ fn handle_kurowser_request(
                     if let Some(idle) = v.get("idle_discard_secs").and_then(|x| x.as_u64()) {
                         d.settings.idle_discard_secs = idle;
                     }
+                    if let Some(heap_mb) = v.get("js_heap_limit_mb").and_then(|x| x.as_u64()) {
+                        d.settings.js_heap_limit_mb = if heap_mb == 0 {
+                            0
+                        } else {
+                            (heap_mb as u32).clamp(128, 4096)
+                        };
+                    }
                     if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
                         d.settings.sidebar_hover_expand = hover_exp;
                     }
@@ -2042,5 +2061,15 @@ mod tests {
             })
         );
         assert_eq!(parse_page_probe_json("null"), None);
+    }
+
+    #[test]
+    fn builds_browser_args_with_and_without_js_heap_cap() {
+        let uncapped = build_browser_args(0);
+        assert!(!uncapped.contains("--js-flags"));
+        let cap_256 = build_browser_args(256);
+        assert!(cap_256.contains("--js-flags=--max-old-space-size=256"));
+        let cap_min = build_browser_args(16);
+        assert!(cap_min.contains("--js-flags=--max-old-space-size=128"));
     }
 }

@@ -481,6 +481,7 @@ fn main() {
     let initial_hover_expand = initial_data.settings.sidebar_hover_expand;
     let initial_max_live = initial_data.settings.max_live_tabs.clamp(2, 4);
     let initial_idle_discard_secs = initial_data.settings.idle_discard_secs;
+    let initial_js_heap_limit_mb = initial_data.settings.js_heap_limit_mb;
     let initial_auto_update = initial_data.settings.auto_update;
     let saved_folders = initial_data.folders.clone();
     let browser_data = Arc::new(Mutex::new(initial_data));
@@ -516,7 +517,7 @@ fn main() {
 
     let initial_ratio = if initial_pinned { 1.0 } else { 0.0 };
     let layout = Layout::compute_ratio(parent_hwnd, initial_ratio);
-    let mut web_context = engine::create_web_context();
+    let mut web_context = engine::create_web_context(initial_js_heap_limit_mb);
 
     let proxy_addr = proxy.clone();
     let addr_hwnd = ui::create_address_bar(parent_hwnd, layout.dpi_scale, move |evt| {
