@@ -115,6 +115,19 @@ All deltas below are measured against the Baseline (`target/release/kurowser.exe
   - **Working Set** drops massively once idle or minimized (`867.81 -> 272.98 MB` in Scenario C; `569.25 -> 197.18 MB` on minimize), cutting `gpu-process` (`~175 -> 15-29 MB`), `browser-host` (`~143-170 -> 23-55 MB`), `kurowser.exe` (`~41 -> 4-10 MB`), `StorageService` (`~20 -> 0.02-3 MB`), and `AudioService` (`~25 -> 4 MB`), freeing physical RAM for the rest of Windows at zero compatibility cost.
   - Verified `cargo test` (`36/36` passed) and post-restore UI/navigation responsiveness.
 
+---
+
+## Optimization 5: Early `FrameNavigationStarting` Ad/Tracker Subframe Blocking (`block_ad_iframes`)
+
+- **Status:** Reverted (no measurable Private memory gain over Opt 3/4)
+- **Tested changes (reverted):** Added `block_ad_iframes` (`Settings`), wired `adblock::should_block_request(..., false, &policy)` into `FrameNavigationStarting` and `Sec-Fetch-Dest: iframe` `WebResourceRequested`, and expanded `BLOCKED_DOMAINS` with 30 third-party verification/DMP/news tracker hosts (`chartbeat.net`, `dotmetrics.net`, `permutive.com`, `doubleverify.com`, `adsafeprotected.com`, `advertising.bbcstudios.com`, etc.).
+- **Measured vs Opt 4 / Baseline:**
+  - **A (Cold Start +10s):** `179.10 MB` Private (`368.18 MB` WS), `6` procs (`-1.02 MB` vs Opt 4, within run-to-run noise)
+  - **B (5 Tabs +20s):** `978.63 MB` Private (`1275.98 MB` WS), `9` procs (`gpu-process` `333.03 MB`; background renderers `80.68 + 77.62 = 158.30 MB` vs Opt 4 `87.80 + 70.11 = 157.91 MB`)
+  - **C (5 Tabs +300s idle):** `580.66 MB` Private (`874.12 MB` WS), `7` procs (vs Opt 3 `581.85 MB` / Opt 4 `592.44 MB` Private)
+- **Why reverted:** Existing `BLOCKED_DOMAINS` in `WebResourceRequested` already blocked major ad servers (`doubleclick.net`, `googlesyndication.com`, `adnxs.com`, `criteo`, `taboola`, `outbrain`, `pubmatic`, `rubiconproject`), so canceling ad subframes earlier and adding 30 secondary tracker hosts did not measurably reduce renderer Private commit on the 5-tab workload. Reverted cleanly to avoid extra COM header inspection per document navigation.
+
+
 
 
 
