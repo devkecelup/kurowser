@@ -388,8 +388,14 @@ impl ThemePalette {
     }
 }
 
+pub const DEFAULT_IDLE_DISCARD_SECS: u64 = 180;
+
 fn default_true() -> bool {
     true
+}
+
+fn default_idle_discard_secs() -> u64 {
+    DEFAULT_IDLE_DISCARD_SECS
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,6 +405,8 @@ pub struct Settings {
     pub custom_accent_hex: Option<String>,
     pub search_engine: SearchEngine,
     pub max_live_tabs: usize,
+    #[serde(default = "default_idle_discard_secs")]
+    pub idle_discard_secs: u64,
     #[serde(default)]
     pub sidebar_pinned: bool,
     #[serde(default = "default_true")]
@@ -422,6 +430,7 @@ impl Default for Settings {
             custom_accent_hex: None,
             search_engine: SearchEngine::Google,
             max_live_tabs: 3,
+            idle_discard_secs: DEFAULT_IDLE_DISCARD_SECS,
             sidebar_pinned: false,
             sidebar_hover_expand: true,
             adblock_enabled: true,
@@ -1237,5 +1246,6 @@ mod tests {
         assert!(parsed.auto_update);
         assert!(!parsed.sidebar_pinned);
         assert!(parsed.sidebar_hover_expand);
+        assert_eq!(parsed.idle_discard_secs, DEFAULT_IDLE_DISCARD_SECS);
     }
 }

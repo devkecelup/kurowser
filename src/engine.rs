@@ -37,10 +37,11 @@ use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, ContentLoadingEventHandler,
     CoreWebView2CustomSchemeRegistration, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
-    GetFaviconCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, SourceChangedEventHandler,
-    StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, ExecuteScriptCompletedHandler,
+    FaviconChangedEventHandler, GetFaviconCompletedHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, SourceChangedEventHandler, StateChangedEventHandler,
+    TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
 };
 use windows::core::{w, HSTRING, Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -950,7 +951,8 @@ pub fn create_webview(
         );
     }
 
-    // 8. Early document-start AdBlock & YouTube ad pruner registration (before first navigation)
+    // 8. Early document-start upload hook + AdBlock script registration (before first navigation)
+    install_page_lifecycle_script(&webview);
     let shields_script_id = Rc::new(RefCell::new(None));
     let initial_policy = {
         browser_data
@@ -1007,14 +1009,18 @@ pub fn create_webview(
                     on_dl_start(uri, path);
 
                     let done_cb = Rc::clone(&on_dl_done);
-                    let _ = op.add_StateChanged(
+                    let dl_finished = Rc::new(Cell::new(false));
+                    let dl_finished_cb = Rc::clone(&dl_finished);
+                    let reg = op.add_StateChanged(
                         &StateChangedEventHandler::create(Box::new(move |dl_op, _| {
                             let Some(dl_op) = dl_op else {
                                 return Ok(());
                             };
                             let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
                             dl_op.State(&mut state)?;
-                            if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+                            if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS
+                                && !dl_finished_cb.replace(true)
+                            {
                                 let mut u = PWSTR::null();
                                 dl_op.Uri(&mut u)?;
                                 let dl_uri = take_pwstr(u);
@@ -1032,6 +1038,15 @@ pub fn create_webview(
                         })),
                         &mut EventRegistrationToken::default(),
                     );
+                    if reg.is_err() && !dl_finished.replace(true) {
+                        let mut u = PWSTR::null();
+                        let dl_uri = if op.Uri(&mut u).is_ok() {
+                            take_pwstr(u)
+                        } else {
+                            String::new()
+                        };
+                        on_dl_done(dl_uri, None, false);
+                    }
 
                     Ok(())
                 })),
@@ -1210,6 +1225,9 @@ fn handle_kurowser_request(
                     }
                     if let Some(m) = v.get("max_live_tabs").and_then(|x| x.as_u64()) {
                         d.settings.max_live_tabs = (m as usize).clamp(2, 4);
+                    }
+                    if let Some(idle) = v.get("idle_discard_secs").and_then(|x| x.as_u64()) {
+                        d.settings.idle_discard_secs = idle;
                     }
                     if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
                         d.settings.sidebar_hover_expand = hover_exp;
@@ -1682,18 +1700,152 @@ pub fn is_playing_audio(webview: &KurowserWebView) -> bool {
     false
 }
 
-pub fn suspend_background(webview: &KurowserWebView) -> (bool, bool) {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageProbeState {
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub active_uploads: bool,
+}
+
+const PAGE_LIFECYCLE_SCRIPT: &str = r#"(()=>{
+if(window!==window.top||location.protocol==='kurowser:')return;
+const HK=Symbol.for('__kr_hooked');
+if(window[HK])return;
+window[HK]=1;
+const UP=Symbol.for('__kr_up');
+window[UP]=0;
+const bump=n=>{window[UP]=Math.max(0,(window[UP]||0)+n);};
+const isUploadBody=b=>b!=null&&(
+  (typeof FormData!=='undefined'&&b instanceof FormData)||
+  (typeof Blob!=='undefined'&&b instanceof Blob)||
+  b instanceof ArrayBuffer||
+  ArrayBuffer.isView(b)||
+  (typeof ReadableStream!=='undefined'&&b instanceof ReadableStream)
+);
+const origFetch=window.fetch;
+if(typeof origFetch==='function'){
+  window.fetch=function(input,init){
+    let up=false;
+    try{
+      const m=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+      if(m==='POST'||m==='PUT'||m==='PATCH'){
+        if(init&&isUploadBody(init.body))up=true;
+        else if(!init&&typeof Request!=='undefined'&&input instanceof Request&&input.body!=null)up=true;
+      }
+    }catch(_){}
+    if(!up)return origFetch.apply(this,arguments);
+    bump(1);
+    try{
+      const p=origFetch.apply(this,arguments);
+      try{Promise.resolve(p).then(()=>bump(-1),()=>bump(-1));}catch(_){}
+      return p;
+    }catch(e){
+      bump(-1);
+      throw e;
+    }
+  };
+}
+const origSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send=function(body){
+  let up=false;
+  try{up=isUploadBody(body);}catch(_){}
+  if(up){
+    bump(1);
+    let done=false;
+    const end=()=>{if(!done){done=true;bump(-1);}};
+    try{this.addEventListener('loadend',end,{once:true});}catch(_){done=true;bump(-1);}
+  }
+  return origSend.apply(this,arguments);
+};
+})();"#;
+
+fn install_page_lifecycle_script(webview: &ICoreWebView2) {
+    let (tx, rx) = mpsc::channel();
+    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+        move |_, _| {
+            let _ = tx.send(());
+            Ok(())
+        },
+    ));
+    let js = HSTRING::from(PAGE_LIFECYCLE_SCRIPT);
+    if unsafe { webview.AddScriptToExecuteOnDocumentCreated(&js, &handler) }.is_ok() {
+        let _ = webview2_com::wait_with_pump(rx);
+    }
+}
+
+pub fn parse_page_probe_json(json_str: &str) -> Option<PageProbeState> {
+    let vals: [i64; 3] = serde_json::from_str(json_str.trim()).ok()?;
+    Some(PageProbeState {
+        scroll_x: vals[0].clamp(0, i32::MAX as i64) as i32,
+        scroll_y: vals[1].clamp(0, i32::MAX as i64) as i32,
+        active_uploads: vals[2] > 0,
+    })
+}
+
+pub fn probe_page_state(
+    webview: &KurowserWebView,
+    on_done: impl FnOnce(Option<PageProbeState>) + 'static,
+) {
+    const SCRIPT: &str = "(()=>{if(location.protocol==='kurowser:')return null;const de=document.documentElement;const x=Math.round(window.scrollX||(de&&de.scrollLeft)||0);const y=Math.round(window.scrollY||(de&&de.scrollTop)||0);const u=(window[Symbol.for('__kr_up')]||0)>0;return[x,y,u?1:0];})()";
+    let cb = Rc::new(RefCell::new(Some(on_done)));
+    let cb_done = Rc::clone(&cb);
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(move |error_code, result_json| {
+        if let Some(f) = cb_done.borrow_mut().take() {
+            let parsed = if error_code.is_ok() {
+                parse_page_probe_json(&result_json)
+            } else {
+                None
+            };
+            f(parsed);
+        }
+        Ok(())
+    }));
+    let js = HSTRING::from(SCRIPT);
+    if unsafe { webview.webview.ExecuteScript(&js, &handler) }.is_err() {
+        if let Some(f) = cb.borrow_mut().take() {
+            f(None);
+        }
+    }
+}
+
+pub fn restore_scroll_position(webview: &KurowserWebView, scroll_x: i32, scroll_y: i32) {
+    if scroll_x <= 0 && scroll_y <= 0 {
+        return;
+    }
+    let sx = scroll_x.max(0);
+    let sy = scroll_y.max(0);
+    let script = format!(
+        "(()=>{{const x={sx},y={sy};let stop=false;const c=()=>{{stop=true;}};window.addEventListener('wheel',c,{{once:true,passive:true}});window.addEventListener('touchstart',c,{{once:true,passive:true}});const go=()=>{{if(!stop)window.scrollTo(x,y);}};go();requestAnimationFrame(go);setTimeout(go,160);setTimeout(go,450);}})()"
+    );
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+    let js = HSTRING::from(script);
+    let _ = unsafe { webview.webview.ExecuteScript(&js, &handler) };
+}
+
+pub fn begin_background(webview: &KurowserWebView) -> bool {
     let audio = is_playing_audio(webview);
     webview.set_visible(false);
     webview.set_memory_usage_level(MemoryLevel::Low);
+    audio
+}
 
-    if !audio {
-        if let Ok(core3) = webview.webview.cast::<ICoreWebView2_3>() {
-            let handler = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
-            if unsafe { core3.TrySuspend(&handler) }.is_ok() {
-                return (false, true);
-            }
+pub fn try_suspend(webview: &KurowserWebView) -> bool {
+    if is_playing_audio(webview) {
+        return false;
+    }
+    if let Ok(core3) = webview.webview.cast::<ICoreWebView2_3>() {
+        let handler = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
+        if unsafe { core3.TrySuspend(&handler) }.is_ok() {
+            return true;
         }
+    }
+    false
+}
+
+pub fn suspend_background(webview: &KurowserWebView) -> (bool, bool) {
+    let audio = begin_background(webview);
+    if !audio && try_suspend(webview) {
+        return (false, true);
     }
     (audio, false)
 }
@@ -1869,5 +2021,26 @@ mod tests {
         );
         assert!(is_dangerous_scheme("JaVaScRiPt:alert(1)"));
         assert!(is_dangerous_scheme("data:text/html,<script>1</script>"));
+    }
+
+    #[test]
+    fn parses_page_probe_json_safely() {
+        assert_eq!(
+            parse_page_probe_json("[12,840,0]"),
+            Some(PageProbeState {
+                scroll_x: 12,
+                scroll_y: 840,
+                active_uploads: false
+            })
+        );
+        assert_eq!(
+            parse_page_probe_json("[-5, 100, 2]"),
+            Some(PageProbeState {
+                scroll_x: 0,
+                scroll_y: 100,
+                active_uploads: true
+            })
+        );
+        assert_eq!(parse_page_probe_json("null"), None);
     }
 }

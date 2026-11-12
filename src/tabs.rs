@@ -1,4 +1,6 @@
-// ─── tabs.rs ─── Tab & Arc/Zen Folder state management with LRU eviction & Shields counter ───
+// Tab and Arc/Zen Folder state management with LRU eviction, idle discard & Shields counter
+use std::time::{Duration, Instant};
+
 use crate::engine::KurowserWebView;
 use crate::storage::{domain_from_url, Rgb, SavedFolder, SavedFolderTab, FOLDER_PALETTE};
 
@@ -22,10 +24,17 @@ pub struct Tab {
     pub blocked_count: u64,
     pub webview: Option<KurowserWebView>,
     pub last_active: u64,
+    pub last_active_at: Instant,
     pub pinned: bool,
     pub is_loading: bool,
     pub is_suspended: bool,
     pub is_audio: bool,
+    pub active_downloads: u32,
+    pub has_active_upload: bool,
+    pub discard_in_flight: bool,
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub restore_scroll_on_load: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
 }
@@ -111,10 +120,17 @@ impl TabStore {
                     blocked_count: 0,
                     webview: None,
                     last_active: 0,
+                    last_active_at: Instant::now(),
                     pinned: false,
                     is_loading: false,
                     is_suspended: false,
                     is_audio: false,
+                    active_downloads: 0,
+                    has_active_upload: false,
+                    discard_in_flight: false,
+                    scroll_x: 0,
+                    scroll_y: 0,
+                    restore_scroll_on_load: false,
                     can_go_back: false,
                     can_go_forward: false,
                 });
@@ -175,10 +191,17 @@ impl TabStore {
             blocked_count: 0,
             webview: None,
             last_active: self.sequence,
+            last_active_at: Instant::now(),
             pinned: false,
             is_loading: false,
             is_suspended: false,
             is_audio: false,
+            active_downloads: 0,
+            has_active_upload: false,
+            discard_in_flight: false,
+            scroll_x: 0,
+            scroll_y: 0,
+            restore_scroll_on_load: false,
             can_go_back: false,
             can_go_forward: false,
         });
@@ -313,7 +336,9 @@ impl TabStore {
         let mut parent_fid = None;
         if let Some(tab) = self.get_tab_mut(id) {
             tab.last_active = seq;
+            tab.last_active_at = Instant::now();
             tab.is_suspended = false;
+            tab.discard_in_flight = false;
             parent_fid = tab.folder_id;
         }
         if let Some(fid) = parent_fid {
@@ -365,6 +390,8 @@ impl TabStore {
                     && Some(t.id) != self.active_id
                     && !t.pinned
                     && !t.is_audio
+                    && t.active_downloads == 0
+                    && !t.has_active_upload
             })
             .min_by_key(|t| t.last_active)
             .map(|t| t.id);
@@ -382,13 +409,37 @@ impl TabStore {
 
     pub fn evict_lru(&mut self) -> Option<KurowserWebView> {
         let lru_id = self.find_lru_live()?;
-        if let Some(tab) = self.get_tab_mut(lru_id) {
-            tab.is_suspended = false;
-            tab.is_loading = false;
-            tab.is_audio = false;
-            return tab.webview.take();
+        self.discard_tab(lru_id)
+    }
+
+    pub fn is_idle_discard_eligible(
+        tab: &Tab,
+        active_id: Option<TabId>,
+        timeout: Duration,
+        now: Instant,
+    ) -> bool {
+        if timeout.is_zero() {
+            return false;
         }
-        None
+        Some(tab.id) != active_id
+            && !tab.pinned
+            && !tab.is_loading
+            && !tab.is_audio
+            && tab.active_downloads == 0
+            && !tab.has_active_upload
+            && now.saturating_duration_since(tab.last_active_at) >= timeout
+    }
+
+    pub fn discard_tab(&mut self, id: TabId) -> Option<KurowserWebView> {
+        let tab = self.get_tab_mut(id)?;
+        tab.is_suspended = false;
+        tab.is_loading = false;
+        tab.is_audio = false;
+        tab.discard_in_flight = false;
+        tab.can_go_back = false;
+        tab.can_go_forward = false;
+        tab.restore_scroll_on_load = tab.scroll_x != 0 || tab.scroll_y != 0;
+        tab.webview.take()
     }
 
     pub fn find_by_url(&self, url: &str) -> Option<TabId> {
@@ -586,5 +637,82 @@ mod tests {
         assert!(restored.folders.is_empty());
         assert_eq!(restored.tabs.len(), 2);
         assert!(restored.tabs.iter().all(|t| t.folder_id.is_none()));
+    }
+
+    #[test]
+    fn idle_discard_guards_protect_pinned_audio_downloads_uploads() {
+        let mut store = TabStore::new();
+        let active = store.add_tab("Active", "https://example.com");
+        let bg = store.add_tab("Bg", "https://github.com");
+        store.set_active(active);
+
+        let timeout = Duration::from_secs(180);
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_secs(200)).unwrap();
+
+        {
+            let tab = store.get_tab_mut(active).unwrap();
+            tab.last_active_at = past;
+        }
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(active).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+
+        {
+            let tab = store.get_tab_mut(bg).unwrap();
+            tab.last_active_at = past;
+        }
+        assert!(TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+
+        store.get_tab_mut(bg).unwrap().pinned = true;
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+        store.get_tab_mut(bg).unwrap().pinned = false;
+
+        store.get_tab_mut(bg).unwrap().is_audio = true;
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+        store.get_tab_mut(bg).unwrap().is_audio = false;
+
+        store.get_tab_mut(bg).unwrap().active_downloads = 1;
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+        store.get_tab_mut(bg).unwrap().active_downloads = 0;
+
+        store.get_tab_mut(bg).unwrap().has_active_upload = true;
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            timeout,
+            now
+        ));
+        store.get_tab_mut(bg).unwrap().has_active_upload = false;
+
+        assert!(!TabStore::is_idle_discard_eligible(
+            store.get_tab(bg).unwrap(),
+            Some(active),
+            Duration::ZERO,
+            now
+        ));
     }
 }
