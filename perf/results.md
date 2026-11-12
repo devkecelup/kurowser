@@ -57,4 +57,36 @@ All deltas below are measured against the Baseline (`target/release/kurowser.exe
   - Priority is compatibility first, RAM second: `256 MB` gives 33% more JS heap headroom against renderer OOM on complex live Docs/Sheets/Figma/GitHub diff tabs while still capping runaway scripts. Power users can set `js_heap_limit_mb` to `192` or `0` in `settings.json`.
   - Compatibility checks passed for both caps: 55-chunk DOM/JS stress page (`heavy-ok`), `docs.google.com/document/u/0/`, YouTube 4K (`Big Buck Bunny`), and `cargo test` (`34/34` passed).
 
+---
+
+## Optimization 3: Verified Edge 157 Feature Flags and In-Process Network Service
+
+- **Status:** Kept (`lean_webview_flags = true`, `network_in_process = true`; both configurable in `settings.json` / `kurowser://api/settings`)
+- **Files changed:** [`src/storage.rs`](../src/storage.rs), [`src/engine.rs`](../src/engine.rs), [`src/main.rs`](../src/main.rs)
+- **Summary:** Inspected Edge WebView2 `157.0.4341.46` (`msedge.dll` and `msedgewebview2.exe`) for exact supported flags, then extended `--disable-features` (adding `Translate`, `LanguageDetection`, `EdgeFeedback`, `OptimizationHintsFetchingSRP`, `MediaRouter`, `DialMediaRouteProvider`, `CastMediaRouteProvider`, `GlobalMediaControls`, `EdgeShopping`, `EdgeWallet`, `SpareRendererForSitePerProcess`, `Prerender2`), appended `--disable-sync --disable-breakpad --disable-speech-api --disable-speech-synthesis-api --disable-component-extensions-with-background-pages --disable-fetching-hints-at-navigation-start`, and enabled `--enable-features=OverlayScrollbar,NetworkServiceInProcess2` (`utility:NetworkService` previously already ran unsandboxed with `--service-sandbox-type=none`, so folding it into `browser-host` saves an entire process without changing network sandboxing).
+
+### Part A: `lean_webview_flags` Only (Before `NetworkServiceInProcess2`)
+
+| Scenario | Baseline Private (MB) | Opt 3a Private (MB) | Delta vs Baseline (MB) | Delta (%) | Working Set (MB) | Process Count |
+|---|---:|---:|---:|---:|---:|---:|
+| **A** (Cold Start +10s) | 185.76 | 187.08 | +1.32 | +0.7% | 392.95 (vs 391.95) | 7 (vs 7) |
+| **B** (5 Tabs +20s) | 1033.83 | 1008.04 | -25.79 | -2.5% | 1311.08 (vs 1332.21) | 10 (vs 10) |
+| **C** (5 Tabs +300s idle) | 754.83 | 596.08 | -158.75 | -21.0% | 913.06 (vs 939.79) | 8 (vs 10) |
+
+### Part B: `lean_webview_flags` + `network_in_process` (`NetworkServiceInProcess2`, Kept Default)
+
+| Scenario | Baseline Private (MB) | Opt 3 Private (MB) | Delta vs Baseline (MB) | Delta (%) | Working Set (MB) | Process Count |
+|---|---:|---:|---:|---:|---:|---:|
+| **A** (Cold Start +10s) | 185.76 | **178.40** | **-7.36** | **-4.0%** | **363.70** (vs 391.95) | **6** (vs 7) |
+| **B** (5 Tabs +20s) | 1033.83 | 973.35 | -60.48 | -5.9% | 1236.78 (vs 1332.21) | **9** (vs 10) |
+| **C** (5 Tabs +300s idle) | 754.83 | **581.85** | **-172.98** | **-22.9%** | **867.81** (vs 939.79) | **7** (vs 10) |
+
+- **Rejected / Ineffective sub-flags tested during Opt 3:**
+  - `--renderer-process-limit=2`: Tested and **reverted**. Edge 157 Site Isolation still spawned all 3 distinct-origin renderers (`bbc.com`, `google.com`, `youtube.com` at `413.7 + 96.47 + 82.52 MB`) while total Private spiked to `1096.06 MB`, so the flag was removed instead of shipping a no-op switch.
+  - `--disable-breakpad`: Left alongside `--disable-sync`, though note `msedgewebview2.exe` still launches `crashpad-handler` (`~2.6-3.5 MB`) independently of breakpad flag parsing.
+- **Notes & Verification:**
+  - Against Opt 2 (`A 187.13 / B 908.61 / C 607.65`, `7 / 10 / 8` procs): `lean_webview_flags` trimmed `browser-host` (`56.82 -> 53.23 MB` in Scenario C), and adding `NetworkServiceInProcess2` eliminated the `utility:NetworkService` process across every scenario (`6 / 9 / 7` procs total), saving `-8.73 MB` Private (`-30.49 MB` WS) in A and `-25.80 MB` Private (`-57.75 MB` WS) in C vs Opt 2. (Scenario B total vs Opt 2 differs only because `gpu-process` was `334.71 MB` at +20s vs `220.05 MB` in Opt 2's +20s run; Scenario B renderers dropped `574.10 -> 538.77 MB` and browser+network dropped `86.36 -> 72.34 MB`.)
+  - Verified live compatibility with `accounts.google.com` (`myaccount.google.com` signed-in session cookies intact), `github.com/login`, and YouTube 4K (`Big Buck Bunny`), plus `cargo test` (`34/34` passed).
+
+
 

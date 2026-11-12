@@ -86,7 +86,6 @@ const EMPTY_PNG_1X1: &[u8] = &[
 ];
 
 const BASE_BROWSER_ARGS: &str = "\
-    --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
     --autoplay-policy=user-gesture-required \
     --process-per-site \
     --disable-background-networking \
@@ -94,15 +93,50 @@ const BASE_BROWSER_ARGS: &str = "\
     --disable-domain-reliability \
     --no-pings";
 
-pub fn build_browser_args(js_heap_limit_mb: u32) -> String {
-    if js_heap_limit_mb == 0 {
-        return BASE_BROWSER_ARGS.to_string();
+const LEGACY_DISABLED_FEATURES: &str = "msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
+// Verified against Edge WebView2 Runtime 157.0.4341.46 msedge.dll.
+const LEAN_DISABLED_FEATURES: &str = "\
+    msWebOOUI,msPdfOOUI,msSmartScreenProtection,\
+    Translate,LanguageDetection,EdgeFeedback,\
+    OptimizationHintsFetchingSRP,\
+    MediaRouter,DialMediaRouteProvider,CastMediaRouteProvider,GlobalMediaControls,\
+    EdgeShopping,EdgeWallet,\
+    SpareRendererForSitePerProcess,Prerender2";
+
+const LEAN_EXTRA_SWITCHES: &str = "\
+    --disable-sync \
+    --disable-breakpad \
+    --disable-speech-api \
+    --disable-speech-synthesis-api \
+    --disable-component-extensions-with-background-pages \
+    --disable-fetching-hints-at-navigation-start";
+
+pub fn build_browser_args(
+    js_heap_limit_mb: u32,
+    lean_webview_flags: bool,
+    network_in_process: bool,
+) -> String {
+    let mut args = if lean_webview_flags {
+        format!(
+            "--disable-features={} {} {}",
+            LEAN_DISABLED_FEATURES, BASE_BROWSER_ARGS, LEAN_EXTRA_SWITCHES
+        )
+    } else {
+        format!(
+            "--disable-features={} {}",
+            LEGACY_DISABLED_FEATURES, BASE_BROWSER_ARGS
+        )
+    };
+    if network_in_process {
+        // Keep OverlayScrollbar enabled alongside in-process NetworkService (verified in Edge 157).
+        args.push_str(" --enable-features=OverlayScrollbar,NetworkServiceInProcess2");
     }
-    let capped = js_heap_limit_mb.clamp(128, 4096);
-    format!(
-        "{} --js-flags=--max-old-space-size={}",
-        BASE_BROWSER_ARGS, capped
-    )
+    if js_heap_limit_mb > 0 {
+        let capped = js_heap_limit_mb.clamp(128, 4096);
+        args.push_str(&format!(" --js-flags=--max-old-space-size={}", capped));
+    }
+    args
 }
 
 static REGISTER_CONTAINER_CLASS: Once = Once::new();
@@ -296,7 +330,11 @@ fn web_context_dir() -> PathBuf {
         .join("WebView2Data")
 }
 
-pub fn create_web_context(js_heap_limit_mb: u32) -> WebContext {
+pub fn create_web_context(
+    js_heap_limit_mb: u32,
+    lean_webview_flags: bool,
+    network_in_process: bool,
+) -> WebContext {
     let dir = web_context_dir();
     let _ = std::fs::create_dir_all(&dir);
 
@@ -312,7 +350,7 @@ pub fn create_web_context(js_heap_limit_mb: u32) -> WebContext {
     }
     let scheme_iface: ICoreWebView2CustomSchemeRegistration = scheme.into();
 
-    let browser_args = build_browser_args(js_heap_limit_mb);
+    let browser_args = build_browser_args(js_heap_limit_mb, lean_webview_flags, network_in_process);
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
         options.set_additional_browser_arguments(browser_args);
@@ -1248,6 +1286,13 @@ fn handle_kurowser_request(
                             (heap_mb as u32).clamp(128, 4096)
                         };
                     }
+                    if let Some(lean) = v.get("lean_webview_flags").and_then(|x| x.as_bool()) {
+                        d.settings.lean_webview_flags = lean;
+                    }
+                    if let Some(net_in_proc) = v.get("network_in_process").and_then(|x| x.as_bool())
+                    {
+                        d.settings.network_in_process = net_in_proc;
+                    }
                     if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
                         d.settings.sidebar_hover_expand = hover_exp;
                     }
@@ -2065,11 +2110,16 @@ mod tests {
 
     #[test]
     fn builds_browser_args_with_and_without_js_heap_cap() {
-        let uncapped = build_browser_args(0);
+        let uncapped = build_browser_args(0, false, false);
         assert!(!uncapped.contains("--js-flags"));
-        let cap_256 = build_browser_args(256);
+        assert!(!uncapped.contains("SpareRendererForSitePerProcess"));
+        assert!(!uncapped.contains("NetworkServiceInProcess2"));
+        let cap_256 = build_browser_args(256, true, true);
         assert!(cap_256.contains("--js-flags=--max-old-space-size=256"));
-        let cap_min = build_browser_args(16);
+        assert!(cap_256.contains("SpareRendererForSitePerProcess"));
+        assert!(cap_256.contains("NetworkServiceInProcess2"));
+        assert!(cap_256.contains("--disable-breakpad"));
+        let cap_min = build_browser_args(16, false, false);
         assert!(cap_min.contains("--js-flags=--max-old-space-size=128"));
     }
 }

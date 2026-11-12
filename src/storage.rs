@@ -414,6 +414,10 @@ pub struct Settings {
     pub idle_discard_secs: u64,
     #[serde(default = "default_js_heap_limit_mb")]
     pub js_heap_limit_mb: u32,
+    #[serde(default = "default_true")]
+    pub lean_webview_flags: bool,
+    #[serde(default = "default_true")]
+    pub network_in_process: bool,
     #[serde(default)]
     pub sidebar_pinned: bool,
     #[serde(default = "default_true")]
@@ -439,6 +443,8 @@ impl Default for Settings {
             max_live_tabs: 3,
             idle_discard_secs: DEFAULT_IDLE_DISCARD_SECS,
             js_heap_limit_mb: DEFAULT_JS_HEAP_LIMIT_MB,
+            lean_webview_flags: true,
+            network_in_process: true,
             sidebar_pinned: false,
             sidebar_hover_expand: true,
             adblock_enabled: true,
@@ -1259,5 +1265,7 @@ mod tests {
         assert!(parsed.sidebar_hover_expand);
         assert_eq!(parsed.idle_discard_secs, DEFAULT_IDLE_DISCARD_SECS);
         assert_eq!(parsed.js_heap_limit_mb, DEFAULT_JS_HEAP_LIMIT_MB);
+        assert!(parsed.lean_webview_flags);
+        assert!(parsed.network_in_process);
     }
 }
