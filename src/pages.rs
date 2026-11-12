@@ -1300,6 +1300,12 @@ pub fn render_settings_page(data: &BrowserData, csp_nonce: &str) -> String {
         SearchEngine::DuckDuckGo => "duckduckgo",
     };
     let max_tabs = data.settings.max_live_tabs;
+    let idle_discard_secs = data.settings.idle_discard_secs;
+    let js_heap_limit_mb = data.settings.js_heap_limit_mb;
+    let lean_webview_flags = data.settings.lean_webview_flags;
+    let network_in_process = data.settings.network_in_process;
+    let trim_on_minimize = data.settings.trim_on_minimize;
+    let idle_trim_secs = data.settings.idle_trim_secs;
     let adblock_enabled = data.settings.adblock_enabled;
     let adblock_cosmetic = data.settings.adblock_cosmetic;
     let total_blocked = data.settings.total_blocked_ads;
@@ -1333,6 +1339,12 @@ pub fn render_settings_page(data: &BrowserData, csp_nonce: &str) -> String {
         "custom_accent_hex": data.settings.custom_accent_hex,
         "search_engine": current_search,
         "max_live_tabs": max_tabs,
+        "idle_discard_secs": idle_discard_secs,
+        "js_heap_limit_mb": js_heap_limit_mb,
+        "lean_webview_flags": lean_webview_flags,
+        "network_in_process": network_in_process,
+        "trim_on_minimize": trim_on_minimize,
+        "idle_trim_secs": idle_trim_secs,
         "sidebar_hover_expand": data.settings.sidebar_hover_expand,
         "adblock_enabled": adblock_enabled,
         "adblock_cosmetic": adblock_cosmetic,
@@ -1386,13 +1398,15 @@ __CSS__
   border:1px solid var(--border);background:var(--bg-surface);cursor:pointer;
 }
 .sel-box{
-  min-height:44px;padding:8px 12px;border-radius:10px;background:var(--bg-surface);
-  color:var(--text);border:1px solid var(--border);font-size:13.5px;
+  min-height:44px;max-width:100%;padding:8px 12px;border-radius:10px;background:var(--bg-surface);
+  color:var(--text);border:1px solid var(--border);font-size:13.5px;transition:border-color .14s;
 }
+.sel-box:hover:not(:disabled){border-color:var(--accent-text)}
 .switch-btn{
   display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
   width:52px;height:44px;padding:0;border:none;background:transparent;border-radius:10px;
 }
+.switch-btn:hover:not(:disabled) .switch-track{border-color:var(--accent-text)}
 .switch-track{
   position:relative;display:block;width:48px;height:26px;border-radius:13px;
   border:1.5px solid var(--border);background:var(--bg-surface);transition:background-color .16s,border-color .16s;
@@ -1496,6 +1510,79 @@ __HEADER__
     </div>
   </div>
 
+  <h2 class="sec-title">Performa &amp; Pengelolaan Memori</h2>
+  <div class="card">
+    <div class="control-row">
+      <div class="control-info">
+        <label for="idle-discard" class="row-title">Tidurkan Tab Menganggur</label>
+        <div class="row-sub">Melepas renderer tab latar belakang (kecuali tab disematkan, berbunyi, atau mengunduh) lalu memuat ulang saat dibuka lagi</div>
+      </div>
+      <select id="idle-discard" class="sel-box">
+        <option value="0">Nonaktif</option>
+        <option value="60">1 menit</option>
+        <option value="180">3 menit (Default)</option>
+        <option value="300">5 menit</option>
+        <option value="600">10 menit</option>
+      </select>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <div id="lbl-trim-min" class="row-title">Pangkas Memori Saat Jendela Diminimize</div>
+        <div class="row-sub">Mengosongkan working set proses Kurowser dan WebView2 ketika jendela diminimize</div>
+      </div>
+      <button id="toggle-trim-min" class="switch-btn" type="button" aria-labelledby="lbl-trim-min" aria-pressed="true">
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <label for="idle-trim" class="row-title">Pangkas Memori Saat Menganggur</label>
+        <div class="row-sub">Menjalankan pemangkasan working set otomatis saat tidak ada aktivitas interaksi</div>
+      </div>
+      <select id="idle-trim" class="sel-box">
+        <option value="0">Nonaktif</option>
+        <option value="60">1 menit</option>
+        <option value="180">3 menit (Default)</option>
+        <option value="300">5 menit</option>
+      </select>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <label for="js-heap-limit" class="row-title">Batas Heap JavaScript V8 (Perlu Restart)</label>
+        <div class="row-sub">Membatasi old-space heap V8 per proses renderer agar situs berat tidak menahan RAM berlebihan</div>
+      </div>
+      <select id="js-heap-limit" class="sel-box">
+        <option value="0">Tanpa batas</option>
+        <option value="192">192 MB (Ketat)</option>
+        <option value="256">256 MB (Default)</option>
+        <option value="512">512 MB (Longgar)</option>
+      </select>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <div id="lbl-lean-flags" class="row-title">Nonaktifkan Fitur WebView2 Non-Esensial (Perlu Restart)</div>
+        <div class="row-sub">Mematikan komponen latar belakang seperti terjemahan bawaan, deteksi bahasa, dan layar percobaan</div>
+      </div>
+      <button id="toggle-lean-flags" class="switch-btn" type="button" aria-labelledby="lbl-lean-flags" aria-pressed="true">
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <div class="control-row">
+      <div class="control-info">
+        <div id="lbl-net-inproc" class="row-title">Gabungkan Network Service dalam Proses Browser (Perlu Restart)</div>
+        <div class="row-sub">Menjalankan layanan jaringan di dalam proses browser WebView2 untuk mengurangi jumlah proses latar belakang</div>
+      </div>
+      <button id="toggle-net-inproc" class="switch-btn" type="button" aria-labelledby="lbl-net-inproc" aria-pressed="true">
+        <span class="switch-track" aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+
   <h2 class="sec-title">__SVG_SHIELD__ Kurowser Shields <span id="shields-status-badge" class="status-text"></span></h2>
   <div class="card">
     <div class="control-row">
@@ -1573,22 +1660,50 @@ function clearErr() {
   errEl.classList.remove('open');
 }
 
-document.getElementById('search-eng').value = state.search_engine;
-document.getElementById('max-tabs').value = String(state.max_live_tabs);
+function setSelectValue(id, value, unitLabel) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const strVal = String(value);
+  const exists = Array.from(el.options).some(opt => opt.value === strVal);
+  if (!exists) {
+    const opt = document.createElement('option');
+    opt.value = strVal;
+    opt.textContent = strVal + ' ' + unitLabel + ' (Kustom)';
+    el.appendChild(opt);
+  }
+  el.value = strVal;
+}
 
-function renderSidebarHoverUi() {
-  const btn = document.getElementById('toggle-hover-sb');
+function setSwitchPressed(id, on) {
+  const btn = document.getElementById(id);
   if (!btn) return;
-  const on = state.sidebar_hover_expand !== false;
   btn.classList.toggle('on', on);
   btn.setAttribute('aria-pressed', String(on));
 }
 
+document.getElementById('search-eng').value = state.search_engine;
+document.getElementById('max-tabs').value = String(state.max_live_tabs);
+setSelectValue('idle-discard', Number.isFinite(Number(state.idle_discard_secs)) ? state.idle_discard_secs : 180, 'detik');
+setSelectValue('idle-trim', Number.isFinite(Number(state.idle_trim_secs)) ? state.idle_trim_secs : 180, 'detik');
+setSelectValue('js-heap-limit', Number.isFinite(Number(state.js_heap_limit_mb)) ? state.js_heap_limit_mb : 256, 'MB');
+
+function renderSidebarHoverUi() {
+  setSwitchPressed('toggle-hover-sb', state.sidebar_hover_expand !== false);
+}
+
+function renderMemoryUi() {
+  setSwitchPressed('toggle-trim-min', state.trim_on_minimize !== false);
+  setSwitchPressed('toggle-lean-flags', state.lean_webview_flags !== false);
+  setSwitchPressed('toggle-net-inproc', state.network_in_process !== false);
+}
+
+let toastTimer = null;
 function showToast(msg) {
   const t = document.getElementById('toast');
   if (msg) t.textContent = msg;
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 1500);
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
 }
 
 function renderShieldUi() {
@@ -1646,7 +1761,7 @@ function renderShieldUi() {
   });
 }
 
-async function save(reloadAfter = true) {
+async function save(reloadAfter = true, toastMsg = 'Pengaturan disimpan') {
   clearErr();
   try {
     const res = await fetch('/api/settings', {
@@ -1655,7 +1770,7 @@ async function save(reloadAfter = true) {
       body: JSON.stringify(state)
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    showToast('Pengaturan disimpan');
+    showToast(toastMsg);
     if (reloadAfter) setTimeout(() => location.reload(), 180);
     return true;
   } catch {
@@ -1725,6 +1840,66 @@ document.getElementById('toggle-hover-sb').addEventListener('click', async () =>
   }
 });
 
+document.getElementById('idle-discard').addEventListener('change', async e => {
+  const prev = state.idle_discard_secs;
+  const parsed = Number(e.target.value);
+  state.idle_discard_secs = Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 180;
+  if (!(await save(false))) {
+    state.idle_discard_secs = prev;
+    e.target.value = String(prev);
+  }
+});
+
+document.getElementById('toggle-trim-min').addEventListener('click', async () => {
+  const prev = state.trim_on_minimize !== false;
+  state.trim_on_minimize = !prev;
+  renderMemoryUi();
+  if (!(await save(false))) {
+    state.trim_on_minimize = prev;
+    renderMemoryUi();
+  }
+});
+
+document.getElementById('idle-trim').addEventListener('change', async e => {
+  const prev = state.idle_trim_secs;
+  const parsed = Number(e.target.value);
+  state.idle_trim_secs = Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 180;
+  if (!(await save(false))) {
+    state.idle_trim_secs = prev;
+    e.target.value = String(prev);
+  }
+});
+
+document.getElementById('js-heap-limit').addEventListener('change', async e => {
+  const prev = state.js_heap_limit_mb;
+  const parsed = Number(e.target.value);
+  state.js_heap_limit_mb = Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 256;
+  if (!(await save(false, 'Disimpan. Mulai ulang Kurowser untuk menerapkan.'))) {
+    state.js_heap_limit_mb = prev;
+    e.target.value = String(prev);
+  }
+});
+
+document.getElementById('toggle-lean-flags').addEventListener('click', async () => {
+  const prev = state.lean_webview_flags !== false;
+  state.lean_webview_flags = !prev;
+  renderMemoryUi();
+  if (!(await save(false, 'Disimpan. Mulai ulang Kurowser untuk menerapkan.'))) {
+    state.lean_webview_flags = prev;
+    renderMemoryUi();
+  }
+});
+
+document.getElementById('toggle-net-inproc').addEventListener('click', async () => {
+  const prev = state.network_in_process !== false;
+  state.network_in_process = !prev;
+  renderMemoryUi();
+  if (!(await save(false, 'Disimpan. Mulai ulang Kurowser untuk menerapkan.'))) {
+    state.network_in_process = prev;
+    renderMemoryUi();
+  }
+});
+
 document.getElementById('toggle-adblock').addEventListener('click', async () => {
   const prev = state.adblock_enabled;
   state.adblock_enabled = !prev;
@@ -1783,7 +1958,7 @@ function renderUpdateUi() {
   const applyBtn = document.getElementById('btn-apply-update');
 
   const modeLabel = updateState.installed ? 'Terinstal' : 'Portabel';
-  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.3') + ' (' + modeLabel + ')';
+  titleEl.textContent = 'Kurowser v' + (updateState.current_version || '1.1.4') + ' (' + modeLabel + ')';
 
   const st = updateState.status || 'idle';
   applyBtn.style.display = st === 'ready' ? '' : 'none';
@@ -1872,6 +2047,7 @@ document.getElementById('btn-apply-update').addEventListener('click', async () =
 });
 
 renderSidebarHoverUi();
+renderMemoryUi();
 renderShieldUi();
 renderUpdateUi();
 if (updateState.status === 'checking' || updateState.status === 'downloading') {
@@ -1910,7 +2086,7 @@ mod tests {
                 ("downloads", render_downloads_page(&data, "testnonce")),
                 ("settings", render_settings_page(&data, "testnonce")),
             ];
-            for (name, html) in pages {
+            for (name, html) in &pages {
                 assert!(
                     !html.contains('\u{2014}'),
                     "page {name} contains forbidden em dash"
@@ -1923,6 +2099,23 @@ mod tests {
                     "{name} missing reduced motion rule"
                 );
                 assert!(html.contains(r#"role="alert""#), "{name} missing alert container");
+            }
+            let settings_html = &pages[4].1;
+            for required_id in [
+                r#"id="idle-discard""#,
+                r#"id="toggle-trim-min""#,
+                r#"id="idle-trim""#,
+                r#"id="js-heap-limit""#,
+                r#"id="toggle-lean-flags""#,
+                r#"id="toggle-net-inproc""#,
+                r#"for="idle-discard""#,
+                r#"for="idle-trim""#,
+                r#"for="js-heap-limit""#,
+            ] {
+                assert!(
+                    settings_html.contains(required_id),
+                    "settings page missing control attribute {required_id}"
+                );
             }
         }
     }
