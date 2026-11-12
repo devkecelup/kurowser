@@ -88,5 +88,33 @@ All deltas below are measured against the Baseline (`target/release/kurowser.exe
   - Against Opt 2 (`A 187.13 / B 908.61 / C 607.65`, `7 / 10 / 8` procs): `lean_webview_flags` trimmed `browser-host` (`56.82 -> 53.23 MB` in Scenario C), and adding `NetworkServiceInProcess2` eliminated the `utility:NetworkService` process across every scenario (`6 / 9 / 7` procs total), saving `-8.73 MB` Private (`-30.49 MB` WS) in A and `-25.80 MB` Private (`-57.75 MB` WS) in C vs Opt 2. (Scenario B total vs Opt 2 differs only because `gpu-process` was `334.71 MB` at +20s vs `220.05 MB` in Opt 2's +20s run; Scenario B renderers dropped `574.10 -> 538.77 MB` and browser+network dropped `86.36 -> 72.34 MB`.)
   - Verified live compatibility with `accounts.google.com` (`myaccount.google.com` signed-in session cookies intact), `github.com/login`, and YouTube 4K (`Big Buck Bunny`), plus `cargo test` (`34/34` passed).
 
+---
+
+## Optimization 4: `EmptyWorkingSet` on Minimize and Idle (`trim_on_minimize`, `idle_trim_secs`)
+
+- **Status:** Kept (`trim_on_minimize = true`, `idle_trim_secs = 180`; both configurable in `settings.json` / `kurowser://api/settings`, `idle_trim_secs = 0` disables idle trim)
+- **Files changed:** [`Cargo.toml`](../Cargo.toml), [`src/storage.rs`](../src/storage.rs), [`src/engine.rs`](../src/engine.rs), [`src/main.rs`](../src/main.rs)
+- **Summary:** Added `trim_process_tree_working_set()` calling `EmptyWorkingSet` on `kurowser.exe` and verified descendant `msedgewebview2.exe` child processes (guarded by both executable name matching and `GetProcessTimes` `c >= r` against Windows PID reuse). Triggers once on `WM_SIZE` `SIZE_MINIMIZED` transition (`trim_on_minimize`), once after `idle_trim_secs` (180s default) of user inactivity when no live tab is playing audio, downloading, uploading, loading, or discarding, and on explicit `TrimMemory`. Also confirmed that `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA` succeeds on all WebView2 process types including sandboxed renderers and `gpu-process`.
+
+| Scenario | Baseline Private (MB) | Opt 4 Private (MB) | Delta vs Baseline (MB) | Opt 4 WS (MB) | Baseline WS (MB) | WS Delta vs Opt 3 | Process Count |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **A** (Cold Start +10s) | 185.76 | 180.12 | -5.64 (-3.0%) | 366.18 | 391.95 | +2.48 MB | 6 (vs 7) |
+| **B** (5 Tabs +20s) | 1033.83 | 1036.71 | +2.88 (+0.3%) | 1362.97 | 1332.21 | +126.19 MB | 9 (vs 10) |
+| **C** (5 Tabs +300s idle) | 754.83 | 592.44 | -162.39 (-21.5%) | **272.98** | 939.79 | **-594.83 MB (-68.5%)** | 7 (vs 10) |
+
+### Minimize / Restore Measurement (`github.com/rust-lang/rust`, Single Tab)
+
+| Phase | Private (MB) | Working Set (MB) | WS Delta vs Pre-Minimize | Process Count |
+|---|---:|---:|---:|---:|
+| Before Minimize | 352.35 | 569.25 | - | 6 |
+| **After Minimize (+3s)** | 380.59 | **197.18** | **-372.07 MB (-65.4%)** | 6 |
+| After Restore + Nav (`example.com`) | 227.01 | 197.64 | -371.61 MB | 6 |
+
+- **Why Private commit stays near Opt 3 while Working Set drops sharply:**
+  - `EmptyWorkingSet` pages out physical RAM pages to standby/modified/pagefile lists without freeing committed VirtualAlloc heaps, so committed **Private** stays near Opt 3 (`592.44` vs `581.85 MB` in C, and `180.12` vs `178.40 MB` in A; Scenario B variance is `gpu-process` at `377.94` vs `334.71 MB` at +20s).
+  - **Working Set** drops massively once idle or minimized (`867.81 -> 272.98 MB` in Scenario C; `569.25 -> 197.18 MB` on minimize), cutting `gpu-process` (`~175 -> 15-29 MB`), `browser-host` (`~143-170 -> 23-55 MB`), `kurowser.exe` (`~41 -> 4-10 MB`), `StorageService` (`~20 -> 0.02-3 MB`), and `AudioService` (`~25 -> 4 MB`), freeing physical RAM for the rest of Windows at zero compatibility cost.
+  - Verified `cargo test` (`36/36` passed) and post-restore UI/navigation responsiveness.
+
+
 
 

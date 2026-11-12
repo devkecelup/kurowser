@@ -1,6 +1,6 @@
 // ─── engine.rs ─── Native WebView2 engine: kurowser:// custom scheme, Security & Shields ───
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex, Once};
@@ -44,10 +44,20 @@ use webview2_com::{
     TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
 };
 use windows::core::{w, HSTRING, Interface, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, BOOL, E_POINTER, E_UNEXPECTED, FILETIME, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, IStream, STREAM_SEEK_SET};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+};
 use windows::Win32::System::WinRT::EventRegistrationToken;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_1, VK_9, VK_B, VK_CONTROL, VK_D, VK_ESCAPE, VK_F5, VK_H, VK_J, VK_L,
@@ -1293,6 +1303,12 @@ fn handle_kurowser_request(
                     {
                         d.settings.network_in_process = net_in_proc;
                     }
+                    if let Some(trim_min) = v.get("trim_on_minimize").and_then(|x| x.as_bool()) {
+                        d.settings.trim_on_minimize = trim_min;
+                    }
+                    if let Some(idle_trim) = v.get("idle_trim_secs").and_then(|x| x.as_u64()) {
+                        d.settings.idle_trim_secs = idle_trim;
+                    }
                     if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
                         d.settings.sidebar_hover_expand = hover_exp;
                     }
@@ -1933,6 +1949,119 @@ pub fn apply_theme(webview: &KurowserWebView, bg: (u8, u8, u8), is_light: bool) 
     webview.set_preferred_color_scheme(is_light);
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkingSetTrimReport {
+    pub attempted: usize,
+    pub trimmed: usize,
+}
+
+pub fn collect_descendant_pids(root_pid: u32, edges: &[(u32, u32)]) -> Vec<u32> {
+    let mut visited = HashSet::new();
+    visited.insert(root_pid);
+    let mut queue = VecDeque::new();
+    queue.push_back(root_pid);
+    let mut out = Vec::new();
+
+    while let Some(cur) = queue.pop_front() {
+        for &(pid, ppid) in edges {
+            if ppid == cur && visited.insert(pid) {
+                out.push(pid);
+                queue.push_back(pid);
+            }
+        }
+    }
+    out
+}
+
+pub fn is_webview2_process_exe(exe_name: &str) -> bool {
+    let base = exe_name.rsplit(['\\', '/']).next().unwrap_or(exe_name);
+    base.eq_ignore_ascii_case("msedgewebview2.exe")
+}
+
+fn process_creation_ticks(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    let mut created = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user).ok()?;
+    }
+    Some(((created.dwHighDateTime as u64) << 32) | (created.dwLowDateTime as u64))
+}
+
+pub fn trim_process_tree_working_set() -> WorkingSetTrimReport {
+    let mut report = WorkingSetTrimReport::default();
+    let root_created = unsafe { process_creation_ticks(GetCurrentProcess()) };
+
+    unsafe {
+        report.attempted += 1;
+        if EmptyWorkingSet(GetCurrentProcess()).is_ok() {
+            report.trimmed += 1;
+        }
+    }
+
+    let root_pid = unsafe { GetCurrentProcessId() };
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return report;
+    };
+
+    let mut edges = Vec::new();
+    let mut webview_pids = HashSet::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    unsafe {
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                edges.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if is_webview2_process_exe(&exe) {
+                    webview_pids.insert(entry.th32ProcessID);
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    for pid in collect_descendant_pids(root_pid, &edges) {
+        if !webview_pids.contains(&pid) {
+            continue;
+        }
+        unsafe {
+            let Ok(h) = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA,
+                false,
+                pid,
+            ) else {
+                continue;
+            };
+            let is_newer = match (root_created, process_creation_ticks(h)) {
+                (Some(r), Some(c)) => c >= r,
+                _ => true,
+            };
+            if is_newer {
+                report.attempted += 1;
+                if EmptyWorkingSet(h).is_ok() {
+                    report.trimmed += 1;
+                }
+            }
+            let _ = CloseHandle(h);
+        }
+    }
+
+    report
+}
+
 fn install_shields_script_blocking(
     webview: &ICoreWebView2,
     script_id_slot: &Rc<RefCell<Option<String>>>,
@@ -2121,5 +2250,21 @@ mod tests {
         assert!(cap_256.contains("--disable-breakpad"));
         let cap_min = build_browser_args(16, false, false);
         assert!(cap_min.contains("--js-flags=--max-old-space-size=128"));
+    }
+
+    #[test]
+    fn collects_descendant_pids_and_matches_webview2_exe() {
+        let edges = vec![
+            (100, 1),    // kurowser root (ppid 1)
+            (200, 100),  // browser-host
+            (201, 200),  // gpu
+            (202, 200),  // renderer
+            (300, 50),   // unrelated SearchHost webview2
+            (203, 202),  // nested utility/sub-worker
+        ];
+        assert_eq!(collect_descendant_pids(100, &edges), vec![200, 201, 202, 203]);
+        assert!(is_webview2_process_exe("msedgewebview2.exe"));
+        assert!(is_webview2_process_exe("C:\\Temp\\MSEdgeWebView2.EXE"));
+        assert!(!is_webview2_process_exe("DiscordSystemHelper.exe"));
     }
 }

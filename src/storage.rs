@@ -390,6 +390,7 @@ impl ThemePalette {
 
 pub const DEFAULT_IDLE_DISCARD_SECS: u64 = 180;
 pub const DEFAULT_JS_HEAP_LIMIT_MB: u32 = 256;
+pub const DEFAULT_IDLE_TRIM_SECS: u64 = 180;
 
 fn default_true() -> bool {
     true
@@ -401,6 +402,10 @@ fn default_idle_discard_secs() -> u64 {
 
 fn default_js_heap_limit_mb() -> u32 {
     DEFAULT_JS_HEAP_LIMIT_MB
+}
+
+fn default_idle_trim_secs() -> u64 {
+    DEFAULT_IDLE_TRIM_SECS
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -418,6 +423,10 @@ pub struct Settings {
     pub lean_webview_flags: bool,
     #[serde(default = "default_true")]
     pub network_in_process: bool,
+    #[serde(default = "default_true")]
+    pub trim_on_minimize: bool,
+    #[serde(default = "default_idle_trim_secs")]
+    pub idle_trim_secs: u64,
     #[serde(default)]
     pub sidebar_pinned: bool,
     #[serde(default = "default_true")]
@@ -445,6 +454,8 @@ impl Default for Settings {
             js_heap_limit_mb: DEFAULT_JS_HEAP_LIMIT_MB,
             lean_webview_flags: true,
             network_in_process: true,
+            trim_on_minimize: true,
+            idle_trim_secs: DEFAULT_IDLE_TRIM_SECS,
             sidebar_pinned: false,
             sidebar_hover_expand: true,
             adblock_enabled: true,
@@ -1267,5 +1278,7 @@ mod tests {
         assert_eq!(parsed.js_heap_limit_mb, DEFAULT_JS_HEAP_LIMIT_MB);
         assert!(parsed.lean_webview_flags);
         assert!(parsed.network_in_process);
+        assert!(parsed.trim_on_minimize);
+        assert_eq!(parsed.idle_trim_secs, DEFAULT_IDLE_TRIM_SECS);
     }
 }

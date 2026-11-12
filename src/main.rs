@@ -93,6 +93,7 @@ enum AppEvent {
     },
     ToggleSidebar,
     WinMinimize,
+    MinimizeTrim,
     WinMaximizeToggle,
     WinClose,
     ToggleBookmark,
@@ -165,6 +166,11 @@ struct AppState {
     omnibox: OmniboxPopup,
     max_live_tabs: usize,
     idle_discard_secs: u64,
+    trim_on_minimize: bool,
+    idle_trim_secs: u64,
+    window_minimized: bool,
+    trimmed_while_idle: bool,
+    last_user_activity: Instant,
     sidebar_pinned: bool,
     sidebar_hover_expand: bool,
     sidebar_hover_open: bool,
@@ -484,6 +490,8 @@ fn main() {
     let initial_js_heap_limit_mb = initial_data.settings.js_heap_limit_mb;
     let initial_lean_flags = initial_data.settings.lean_webview_flags;
     let initial_net_in_proc = initial_data.settings.network_in_process;
+    let initial_trim_on_minimize = initial_data.settings.trim_on_minimize;
+    let initial_idle_trim_secs = initial_data.settings.idle_trim_secs;
     let initial_auto_update = initial_data.settings.auto_update;
     let saved_folders = initial_data.folders.clone();
     let browser_data = Arc::new(Mutex::new(initial_data));
@@ -585,6 +593,11 @@ fn main() {
         omnibox,
         max_live_tabs: initial_max_live,
         idle_discard_secs: initial_idle_discard_secs,
+        trim_on_minimize: initial_trim_on_minimize,
+        idle_trim_secs: initial_idle_trim_secs,
+        window_minimized: false,
+        trimmed_while_idle: false,
+        last_user_activity: Instant::now(),
         sidebar_pinned: initial_pinned,
         sidebar_hover_expand: initial_hover_expand,
         sidebar_hover_open: false,
@@ -958,6 +971,16 @@ fn main() {
                     }
                 }
 
+                AppEvent::MinimizeTrim => {
+                    let should_trim = {
+                        let st = state.borrow();
+                        st.window_minimized && st.trim_on_minimize
+                    };
+                    if should_trim {
+                        let _ = engine::trim_process_tree_working_set();
+                    }
+                }
+
                 AppEvent::WinMaximizeToggle => {
                     unsafe {
                         let cmd = if IsZoomed(parent_hwnd).as_bool() {
@@ -978,6 +1001,7 @@ fn main() {
                 AppEvent::ToggleBookmark => {
                     {
                         let mut st = state.borrow_mut();
+                        note_user_activity(&mut st);
                         if let Some(tab) = st.tab_store.active_tab() {
                             let url = tab.url.clone();
                             let title = tab.title.clone();
@@ -1000,6 +1024,7 @@ fn main() {
                 AppEvent::SubmitAddressBar(raw_input) => {
                     let target = {
                         let mut st = state.borrow_mut();
+                        note_user_activity(&mut st);
                         let picked = st.omnibox.selected_url();
                         st.omnibox.hide();
                         st.addr_user_editing = false;
@@ -1011,6 +1036,7 @@ fn main() {
                 AppEvent::PickSuggestion(idx) => {
                     let target = {
                         let mut st = state.borrow_mut();
+                        note_user_activity(&mut st);
                         let url = st
                             .omnibox
                             .state
@@ -1031,6 +1057,7 @@ fn main() {
                     if !ui::is_setting_address_text() && ui::is_address_bar_focused(addr_hwnd) {
                         let query = ui::get_address_bar_text(addr_hwnd);
                         let mut st = state.borrow_mut();
+                        note_user_activity(&mut st);
                         st.addr_user_editing = true;
                         let suggestions = {
                             let d = st.browser_data.lock().unwrap_or_else(|e| e.into_inner());
@@ -1120,7 +1147,8 @@ fn main() {
                 }
 
                 AppEvent::GoBack => {
-                    let st = state.borrow();
+                    let mut st = state.borrow_mut();
+                    note_user_activity(&mut st);
                     if let Some(tab) = st.tab_store.active_tab() {
                         if let Some(ref wv) = tab.webview {
                             engine::go_back(wv);
@@ -1129,7 +1157,8 @@ fn main() {
                 }
 
                 AppEvent::GoForward => {
-                    let st = state.borrow();
+                    let mut st = state.borrow_mut();
+                    note_user_activity(&mut st);
                     if let Some(tab) = st.tab_store.active_tab() {
                         if let Some(ref wv) = tab.webview {
                             engine::go_forward(wv);
@@ -1138,7 +1167,8 @@ fn main() {
                 }
 
                 AppEvent::ReloadOrStop => {
-                    let st = state.borrow();
+                    let mut st = state.borrow_mut();
+                    note_user_activity(&mut st);
                     if let Some(tab) = st.tab_store.active_tab() {
                         if let Some(ref wv) = tab.webview {
                             if tab.is_loading {
@@ -1205,6 +1235,7 @@ fn main() {
 
                 AppEvent::DownloadStarted { tab_id, url, path } => {
                     let mut st = state.borrow_mut();
+                    note_user_activity(&mut st);
                     if let Some(tab) = st.tab_store.get_tab_mut(tab_id) {
                         tab.active_downloads = tab.active_downloads.saturating_add(1);
                         tab.last_active_at = Instant::now();
@@ -1222,6 +1253,7 @@ fn main() {
                     ok,
                 } => {
                     let mut st = state.borrow_mut();
+                    note_user_activity(&mut st);
                     if let Some(tab) = st.tab_store.get_tab_mut(tab_id) {
                         tab.active_downloads = tab.active_downloads.saturating_sub(1);
                         tab.last_active_at = Instant::now();
@@ -1247,13 +1279,22 @@ fn main() {
                 AppEvent::InternalApi(api_evt) => match api_evt {
                     InternalApiEvent::SettingsUpdated => {
                         let mut st = state.borrow_mut();
-                        let (new_palette, new_max, new_hover_expand, new_idle_secs) = {
+                        let (
+                            new_palette,
+                            new_max,
+                            new_hover_expand,
+                            new_idle_secs,
+                            new_trim_min,
+                            new_idle_trim_secs,
+                        ) = {
                             let d = st.browser_data.lock().unwrap_or_else(|e| e.into_inner());
                             (
                                 d.palette(),
                                 d.settings.max_live_tabs.clamp(2, 4),
                                 d.settings.sidebar_hover_expand,
                                 d.settings.idle_discard_secs,
+                                d.settings.trim_on_minimize,
+                                d.settings.idle_trim_secs,
                             )
                         };
                         let bg = (
@@ -1265,6 +1306,9 @@ fn main() {
                         st.palette = new_palette.clone();
                         st.max_live_tabs = new_max;
                         st.idle_discard_secs = new_idle_secs;
+                        st.trim_on_minimize = new_trim_min;
+                        st.idle_trim_secs = new_idle_trim_secs;
+                        note_user_activity(&mut st);
                         st.sidebar_hover_expand = new_hover_expand;
                         if !new_hover_expand {
                             st.sidebar_hover_open = false;
@@ -1904,6 +1948,9 @@ fn sync_tab_navigation(
             && (!st.addr_user_editing || (url_changed && !popup_open));
 
         if is_active {
+            if url_changed {
+                note_user_activity(&mut st);
+            }
             let bm = st
                 .browser_data
                 .lock()
@@ -2037,6 +2084,10 @@ fn handle_shortcut(
     web_context: &RefCell<engine::WebContext>,
     proxy: &EventLoopProxy<AppEvent>,
 ) {
+    {
+        let mut st = state.borrow_mut();
+        note_user_activity(&mut st);
+    }
     match act {
         AcceleratorAction::NewTab => open_new_tab(state, web_context, proxy, None, None),
         AcceleratorAction::CloseTab => close_tab(state, web_context, proxy, None),
@@ -2315,37 +2366,62 @@ fn sync_sidebar_layout(state: &Rc<RefCell<AppState>>) {
     }
 }
 
+fn note_user_activity(st: &mut AppState) {
+    st.last_user_activity = Instant::now();
+    st.trimmed_while_idle = false;
+}
+
+fn should_run_idle_trim(
+    idle_elapsed_secs: u64,
+    idle_trim_secs: u64,
+    already_trimmed: bool,
+    window_minimized: bool,
+    has_busy_tab: bool,
+    has_discard_in_flight: bool,
+) -> bool {
+    idle_trim_secs > 0
+        && !already_trimmed
+        && !window_minimized
+        && !has_busy_tab
+        && !has_discard_in_flight
+        && idle_elapsed_secs >= idle_trim_secs
+}
+
 fn trim_inactive_memory(state: &Rc<RefCell<AppState>>) {
-    let mut st = state.borrow_mut();
-    let active_id = st.tab_store.active_id;
+    {
+        let mut st = state.borrow_mut();
+        let active_id = st.tab_store.active_id;
 
-    let evict_ids: Vec<TabId> = st
-        .tab_store
-        .tabs
-        .iter()
-        .filter(|t| {
-            t.webview.is_some()
-                && Some(t.id) != active_id
-                && !t.pinned
-                && !t.is_audio
-        })
-        .map(|t| t.id)
-        .collect();
+        let evict_ids: Vec<TabId> = st
+            .tab_store
+            .tabs
+            .iter()
+            .filter(|t| {
+                t.webview.is_some()
+                    && Some(t.id) != active_id
+                    && !t.pinned
+                    && !t.is_audio
+            })
+            .map(|t| t.id)
+            .collect();
 
-    for id in evict_ids {
-        let old = st.tab_store.discard_tab(id);
-        drop(old);
-    }
+        for id in evict_ids {
+            let old = st.tab_store.discard_tab(id);
+            drop(old);
+        }
 
-    for tab in &mut st.tab_store.tabs {
-        if Some(tab.id) != active_id {
-            if let Some(ref wv) = tab.webview {
-                let (audio, suspended) = engine::suspend_background(wv);
-                tab.is_audio = audio;
-                tab.is_suspended = suspended;
+        for tab in &mut st.tab_store.tabs {
+            if Some(tab.id) != active_id {
+                if let Some(ref wv) = tab.webview {
+                    let (audio, suspended) = engine::suspend_background(wv);
+                    tab.is_audio = audio;
+                    tab.is_suspended = suspended;
+                }
             }
         }
+        st.trimmed_while_idle = true;
     }
+    let _ = engine::trim_process_tree_working_set();
 }
 
 fn background_current_active(st: &mut AppState, proxy: &EventLoopProxy<AppEvent>) {
@@ -2406,59 +2482,94 @@ fn handle_background_probe_ready(
 }
 
 fn check_idle_tabs(state: &Rc<RefCell<AppState>>, proxy: &EventLoopProxy<AppEvent>) {
-    let mut st = state.borrow_mut();
-    let idle_secs = st.idle_discard_secs;
-    if idle_secs == 0 {
-        return;
-    }
-    let timeout = Duration::from_secs(idle_secs);
-    let now = Instant::now();
-    let active_id = st.tab_store.active_id;
-    let parent_hwnd = st.parent_hwnd;
+    let (changed, should_trim_ws, parent_hwnd) = {
+        let mut st = state.borrow_mut();
+        let idle_secs = st.idle_discard_secs;
+        let idle_trim_secs = st.idle_trim_secs;
+        if idle_secs == 0 && idle_trim_secs == 0 {
+            return;
+        }
+        let timeout = Duration::from_secs(idle_secs);
+        let now = Instant::now();
+        let active_id = st.tab_store.active_id;
+        let parent_hwnd = st.parent_hwnd;
 
-    let mut discard_ready = Vec::new();
-    for tab in &mut st.tab_store.tabs {
-        if Some(tab.id) == active_id {
-            tab.last_active_at = now;
-            continue;
-        }
-        let Some(ref wv) = tab.webview else {
-            continue;
-        };
-        if tab.pinned || tab.is_loading || tab.discard_in_flight {
-            continue;
-        }
-        tab.is_audio = engine::is_playing_audio(wv);
-        if tab.is_audio || tab.active_downloads > 0 {
-            tab.last_active_at = now;
-            continue;
-        }
-        if now.saturating_duration_since(tab.last_active_at) < timeout {
-            continue;
-        }
-        if tab.is_suspended && !tab.has_active_upload {
-            discard_ready.push(tab.id);
-        } else {
-            tab.discard_in_flight = true;
-            let tid = tab.id;
-            let p = proxy.clone();
-            engine::probe_page_state(wv, move |probe| {
-                let _ = p.send_event(AppEvent::IdleDiscardProbeReady {
-                    tab_id: tid,
-                    probe,
+        let mut discard_ready = Vec::new();
+        let mut any_live_busy = false;
+        let mut any_discard_in_flight = false;
+
+        for tab in &mut st.tab_store.tabs {
+            let Some(ref wv) = tab.webview else {
+                continue;
+            };
+            let audio = engine::is_playing_audio(wv);
+            tab.is_audio = audio;
+            if audio || tab.active_downloads > 0 || tab.has_active_upload || tab.is_loading {
+                any_live_busy = true;
+            }
+            if tab.discard_in_flight {
+                any_discard_in_flight = true;
+            }
+            if Some(tab.id) == active_id {
+                tab.last_active_at = now;
+                continue;
+            }
+            if idle_secs == 0 || tab.pinned || tab.is_loading || tab.discard_in_flight {
+                continue;
+            }
+            if tab.is_audio || tab.active_downloads > 0 {
+                tab.last_active_at = now;
+                continue;
+            }
+            if now.saturating_duration_since(tab.last_active_at) < timeout {
+                continue;
+            }
+            if tab.is_suspended && !tab.has_active_upload {
+                discard_ready.push(tab.id);
+            } else {
+                tab.discard_in_flight = true;
+                any_discard_in_flight = true;
+                let tid = tab.id;
+                let p = proxy.clone();
+                engine::probe_page_state(wv, move |probe| {
+                    let _ = p.send_event(AppEvent::IdleDiscardProbeReady {
+                        tab_id: tid,
+                        probe,
+                    });
                 });
-            });
+            }
         }
-    }
 
-    let mut changed = false;
-    for id in discard_ready {
-        if let Some(old) = st.tab_store.discard_tab(id) {
-            drop(old);
-            changed = true;
+        let mut changed = false;
+        for id in discard_ready {
+            if let Some(old) = st.tab_store.discard_tab(id) {
+                drop(old);
+                changed = true;
+            }
         }
+
+        if any_live_busy {
+            note_user_activity(&mut st);
+        }
+
+        let idle_elapsed_secs = now.saturating_duration_since(st.last_user_activity).as_secs();
+        let trim_now = should_run_idle_trim(
+            idle_elapsed_secs,
+            idle_trim_secs,
+            st.trimmed_while_idle,
+            st.window_minimized,
+            any_live_busy,
+            any_discard_in_flight,
+        );
+        if trim_now {
+            st.trimmed_while_idle = true;
+        }
+        (changed, trim_now, parent_hwnd)
+    };
+
+    if should_trim_ws {
+        let _ = engine::trim_process_tree_working_set();
     }
-    drop(st);
     if changed {
         invalidate_chrome(parent_hwnd);
     }
@@ -2562,6 +2673,7 @@ fn open_new_tab(
 
     let (id, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
+        note_user_activity(&mut st);
         st.addr_user_editing = false;
         st.omnibox.hide();
         background_current_active(&mut st, proxy);
@@ -2644,6 +2756,7 @@ fn switch_to_tab(
 ) {
     let (already_active, has_webview, url, title, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
+        note_user_activity(&mut st);
         st.addr_user_editing = false;
         st.omnibox.hide();
         if st.tab_store.get_tab(target_id).is_none() {
@@ -2666,6 +2779,7 @@ fn switch_to_tab(
             if let Some(ref wv) = tab.webview {
                 engine::resume_foreground(wv, bounds);
                 tab.is_suspended = false;
+                tab.has_active_upload = false;
                 tab.can_go_back = engine::can_go_back(wv);
                 tab.can_go_forward = engine::can_go_forward(wv);
             }
@@ -2740,6 +2854,7 @@ fn close_tab(
 ) {
     let (next_active, is_empty) = {
         let mut st = state.borrow_mut();
+        note_user_activity(&mut st);
         let Some(target_id) = target_opt.or(st.tab_store.active_id) else {
             return;
         };
@@ -2771,6 +2886,7 @@ fn navigate_active_tab(
 ) {
     let (active_id, has_wv, normalized, bounds, browser_data, addr_hwnd, parent_hwnd) = {
         let mut st = state.borrow_mut();
+        note_user_activity(&mut st);
         st.addr_user_editing = false;
         let search_engine = st
             .browser_data
@@ -3205,6 +3321,21 @@ unsafe extern "system" fn subclass_proc(
             }
         }
 
+        WM_SIZE => {
+            let minimized = wparam.0 == SIZE_MINIMIZED as usize;
+            if let Ok(mut st) = state.try_borrow_mut() {
+                if minimized && !st.window_minimized {
+                    st.window_minimized = true;
+                    if st.trim_on_minimize {
+                        let _ = proxy.send_event(AppEvent::MinimizeTrim);
+                    }
+                } else if !minimized && st.window_minimized {
+                    st.window_minimized = false;
+                    note_user_activity(&mut st);
+                }
+            }
+        }
+
         WM_ACTIVATE => {
             let active_state = (wparam.0 & 0xFFFF) as u32;
             if active_state == WA_INACTIVE {
@@ -3234,6 +3365,8 @@ unsafe extern "system" fn subclass_proc(
                 if had_drag {
                     invalidate_chrome(hwnd);
                 }
+            } else if let Ok(mut st) = state.try_borrow_mut() {
+                note_user_activity(&mut st);
             }
         }
 
@@ -3255,6 +3388,7 @@ unsafe extern "system" fn subclass_proc(
             let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             if let Ok(mut st) = state.try_borrow_mut() {
+                note_user_activity(&mut st);
                 if ui::point_in_rect(pt.x, pt.y, &st.layout.sidebar) {
                     if st.layout.sidebar_expanded && st.renaming_folder.take().is_some() {
                         ui::hide_folder_rename_edit(st.rename_hwnd);
@@ -3303,6 +3437,7 @@ unsafe extern "system" fn subclass_proc(
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
             if let Ok(mut st) = state.try_borrow_mut() {
+                note_user_activity(&mut st);
                 st.omnibox.hide();
 
                 let badge = nav_has_shield_badge(&st);
@@ -3504,7 +3639,8 @@ unsafe extern "system" fn subclass_proc(
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
-            if let Ok(st) = state.try_borrow() {
+            if let Ok(mut st) = state.try_borrow_mut() {
+                note_user_activity(&mut st);
                 let entries = st.tab_store.sidebar_entries();
                 let hit = if st.layout.sidebar_expanded {
                     ui::hit_test_sidebar(
@@ -3532,7 +3668,8 @@ unsafe extern "system" fn subclass_proc(
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
-            if let Ok(st) = state.try_borrow() {
+            if let Ok(mut st) = state.try_borrow_mut() {
+                note_user_activity(&mut st);
                 let badge = nav_has_shield_badge(&st);
                 if let Some(TopbarButton::Shield) = ui::hit_test_topbar(&st.layout, badge, x, y) {
                     let _ = proxy.send_event(AppEvent::OpenShieldsMenu {
@@ -3784,5 +3921,16 @@ mod tests {
         assert!(!should_arm_hover_expand(false, false, false, false, true));
         assert!(!should_arm_hover_expand(false, true, true, false, true));
         assert!(!should_arm_hover_expand(false, true, false, false, false));
+    }
+
+    #[test]
+    fn idle_trim_gates_one_shot_and_blocks_busy_or_minimized() {
+        assert!(!should_run_idle_trim(179, 180, false, false, false, false));
+        assert!(should_run_idle_trim(180, 180, false, false, false, false));
+        assert!(!should_run_idle_trim(300, 180, true, false, false, false));
+        assert!(!should_run_idle_trim(300, 0, false, false, false, false));
+        assert!(!should_run_idle_trim(300, 180, false, true, false, false));
+        assert!(!should_run_idle_trim(300, 180, false, false, true, false));
+        assert!(!should_run_idle_trim(300, 180, false, false, false, true));
     }
 }
