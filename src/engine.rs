@@ -1,6 +1,6 @@
 // ─── engine.rs ─── Native WebView2 engine: kurowser:// custom scheme, Security & Shields ───
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex, Once};
@@ -37,16 +37,27 @@ use webview2_com::{
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, ContentLoadingEventHandler,
     CoreWebView2CustomSchemeRegistration, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, FaviconChangedEventHandler,
-    GetFaviconCompletedHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler, SourceChangedEventHandler,
-    StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
+    DocumentTitleChangedEventHandler, DownloadStartingEventHandler, ExecuteScriptCompletedHandler,
+    FaviconChangedEventHandler, GetFaviconCompletedHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler, SourceChangedEventHandler, StateChangedEventHandler,
+    TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
 };
 use windows::core::{w, HSTRING, Interface, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{BOOL, E_POINTER, E_UNEXPECTED, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, BOOL, E_POINTER, E_UNEXPECTED, FILETIME, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, IStream, STREAM_SEEK_SET};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+};
 use windows::Win32::System::WinRT::EventRegistrationToken;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_1, VK_9, VK_B, VK_CONTROL, VK_D, VK_ESCAPE, VK_F5, VK_H, VK_J, VK_L,
@@ -84,14 +95,59 @@ const EMPTY_PNG_1X1: &[u8] = &[
     0x42, 0x60, 0x82,
 ];
 
-const BROWSER_ARGS: &str = "\
-    --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+const BASE_BROWSER_ARGS: &str = "\
     --autoplay-policy=user-gesture-required \
     --process-per-site \
     --disable-background-networking \
     --disable-component-update \
     --disable-domain-reliability \
     --no-pings";
+
+const LEGACY_DISABLED_FEATURES: &str = "msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
+// Verified against Edge WebView2 Runtime 157.0.4341.46 msedge.dll.
+const LEAN_DISABLED_FEATURES: &str = "\
+    msWebOOUI,msPdfOOUI,msSmartScreenProtection,\
+    Translate,LanguageDetection,EdgeFeedback,\
+    OptimizationHintsFetchingSRP,\
+    MediaRouter,DialMediaRouteProvider,CastMediaRouteProvider,GlobalMediaControls,\
+    EdgeShopping,EdgeWallet,\
+    SpareRendererForSitePerProcess,Prerender2";
+
+const LEAN_EXTRA_SWITCHES: &str = "\
+    --disable-sync \
+    --disable-breakpad \
+    --disable-speech-api \
+    --disable-speech-synthesis-api \
+    --disable-component-extensions-with-background-pages \
+    --disable-fetching-hints-at-navigation-start";
+
+pub fn build_browser_args(
+    js_heap_limit_mb: u32,
+    lean_webview_flags: bool,
+    network_in_process: bool,
+) -> String {
+    let mut args = if lean_webview_flags {
+        format!(
+            "--disable-features={} {} {}",
+            LEAN_DISABLED_FEATURES, BASE_BROWSER_ARGS, LEAN_EXTRA_SWITCHES
+        )
+    } else {
+        format!(
+            "--disable-features={} {}",
+            LEGACY_DISABLED_FEATURES, BASE_BROWSER_ARGS
+        )
+    };
+    if network_in_process {
+        // Keep OverlayScrollbar enabled alongside in-process NetworkService (verified in Edge 157).
+        args.push_str(" --enable-features=OverlayScrollbar,NetworkServiceInProcess2");
+    }
+    if js_heap_limit_mb > 0 {
+        let capped = js_heap_limit_mb.clamp(128, 4096);
+        args.push_str(&format!(" --js-flags=--max-old-space-size={}", capped));
+    }
+    args
+}
 
 static REGISTER_CONTAINER_CLASS: Once = Once::new();
 
@@ -284,7 +340,11 @@ fn web_context_dir() -> PathBuf {
         .join("WebView2Data")
 }
 
-pub fn create_web_context() -> WebContext {
+pub fn create_web_context(
+    js_heap_limit_mb: u32,
+    lean_webview_flags: bool,
+    network_in_process: bool,
+) -> WebContext {
     let dir = web_context_dir();
     let _ = std::fs::create_dir_all(&dir);
 
@@ -300,9 +360,10 @@ pub fn create_web_context() -> WebContext {
     }
     let scheme_iface: ICoreWebView2CustomSchemeRegistration = scheme.into();
 
+    let browser_args = build_browser_args(js_heap_limit_mb, lean_webview_flags, network_in_process);
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
-        options.set_additional_browser_arguments(BROWSER_ARGS.to_string());
+        options.set_additional_browser_arguments(browser_args);
         options.set_enable_tracking_prevention(true);
         options.set_are_browser_extensions_enabled(false);
         options.set_is_custom_crash_reporting_enabled(false);
@@ -950,7 +1011,8 @@ pub fn create_webview(
         );
     }
 
-    // 8. Early document-start AdBlock & YouTube ad pruner registration (before first navigation)
+    // 8. Early document-start upload hook + AdBlock script registration (before first navigation)
+    install_page_lifecycle_script(&webview);
     let shields_script_id = Rc::new(RefCell::new(None));
     let initial_policy = {
         browser_data
@@ -1007,14 +1069,18 @@ pub fn create_webview(
                     on_dl_start(uri, path);
 
                     let done_cb = Rc::clone(&on_dl_done);
-                    let _ = op.add_StateChanged(
+                    let dl_finished = Rc::new(Cell::new(false));
+                    let dl_finished_cb = Rc::clone(&dl_finished);
+                    let reg = op.add_StateChanged(
                         &StateChangedEventHandler::create(Box::new(move |dl_op, _| {
                             let Some(dl_op) = dl_op else {
                                 return Ok(());
                             };
                             let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
                             dl_op.State(&mut state)?;
-                            if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+                            if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS
+                                && !dl_finished_cb.replace(true)
+                            {
                                 let mut u = PWSTR::null();
                                 dl_op.Uri(&mut u)?;
                                 let dl_uri = take_pwstr(u);
@@ -1032,6 +1098,15 @@ pub fn create_webview(
                         })),
                         &mut EventRegistrationToken::default(),
                     );
+                    if reg.is_err() && !dl_finished.replace(true) {
+                        let mut u = PWSTR::null();
+                        let dl_uri = if op.Uri(&mut u).is_ok() {
+                            take_pwstr(u)
+                        } else {
+                            String::new()
+                        };
+                        on_dl_done(dl_uri, None, false);
+                    }
 
                     Ok(())
                 })),
@@ -1210,6 +1285,29 @@ fn handle_kurowser_request(
                     }
                     if let Some(m) = v.get("max_live_tabs").and_then(|x| x.as_u64()) {
                         d.settings.max_live_tabs = (m as usize).clamp(2, 4);
+                    }
+                    if let Some(idle) = v.get("idle_discard_secs").and_then(|x| x.as_u64()) {
+                        d.settings.idle_discard_secs = idle;
+                    }
+                    if let Some(heap_mb) = v.get("js_heap_limit_mb").and_then(|x| x.as_u64()) {
+                        d.settings.js_heap_limit_mb = if heap_mb == 0 {
+                            0
+                        } else {
+                            (heap_mb as u32).clamp(128, 4096)
+                        };
+                    }
+                    if let Some(lean) = v.get("lean_webview_flags").and_then(|x| x.as_bool()) {
+                        d.settings.lean_webview_flags = lean;
+                    }
+                    if let Some(net_in_proc) = v.get("network_in_process").and_then(|x| x.as_bool())
+                    {
+                        d.settings.network_in_process = net_in_proc;
+                    }
+                    if let Some(trim_min) = v.get("trim_on_minimize").and_then(|x| x.as_bool()) {
+                        d.settings.trim_on_minimize = trim_min;
+                    }
+                    if let Some(idle_trim) = v.get("idle_trim_secs").and_then(|x| x.as_u64()) {
+                        d.settings.idle_trim_secs = idle_trim;
                     }
                     if let Some(hover_exp) = v.get("sidebar_hover_expand").and_then(|x| x.as_bool()) {
                         d.settings.sidebar_hover_expand = hover_exp;
@@ -1682,18 +1780,152 @@ pub fn is_playing_audio(webview: &KurowserWebView) -> bool {
     false
 }
 
-pub fn suspend_background(webview: &KurowserWebView) -> (bool, bool) {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageProbeState {
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub active_uploads: bool,
+}
+
+const PAGE_LIFECYCLE_SCRIPT: &str = r#"(()=>{
+if(window!==window.top||location.protocol==='kurowser:')return;
+const HK=Symbol.for('__kr_hooked');
+if(window[HK])return;
+window[HK]=1;
+const UP=Symbol.for('__kr_up');
+window[UP]=0;
+const bump=n=>{window[UP]=Math.max(0,(window[UP]||0)+n);};
+const isUploadBody=b=>b!=null&&(
+  (typeof FormData!=='undefined'&&b instanceof FormData)||
+  (typeof Blob!=='undefined'&&b instanceof Blob)||
+  b instanceof ArrayBuffer||
+  ArrayBuffer.isView(b)||
+  (typeof ReadableStream!=='undefined'&&b instanceof ReadableStream)
+);
+const origFetch=window.fetch;
+if(typeof origFetch==='function'){
+  window.fetch=function(input,init){
+    let up=false;
+    try{
+      const m=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+      if(m==='POST'||m==='PUT'||m==='PATCH'){
+        if(init&&isUploadBody(init.body))up=true;
+        else if(!init&&typeof Request!=='undefined'&&input instanceof Request&&input.body!=null)up=true;
+      }
+    }catch(_){}
+    if(!up)return origFetch.apply(this,arguments);
+    bump(1);
+    try{
+      const p=origFetch.apply(this,arguments);
+      try{Promise.resolve(p).then(()=>bump(-1),()=>bump(-1));}catch(_){}
+      return p;
+    }catch(e){
+      bump(-1);
+      throw e;
+    }
+  };
+}
+const origSend=XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send=function(body){
+  let up=false;
+  try{up=isUploadBody(body);}catch(_){}
+  if(up){
+    bump(1);
+    let done=false;
+    const end=()=>{if(!done){done=true;bump(-1);}};
+    try{this.addEventListener('loadend',end,{once:true});}catch(_){done=true;bump(-1);}
+  }
+  return origSend.apply(this,arguments);
+};
+})();"#;
+
+fn install_page_lifecycle_script(webview: &ICoreWebView2) {
+    let (tx, rx) = mpsc::channel();
+    let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+        move |_, _| {
+            let _ = tx.send(());
+            Ok(())
+        },
+    ));
+    let js = HSTRING::from(PAGE_LIFECYCLE_SCRIPT);
+    if unsafe { webview.AddScriptToExecuteOnDocumentCreated(&js, &handler) }.is_ok() {
+        let _ = webview2_com::wait_with_pump(rx);
+    }
+}
+
+pub fn parse_page_probe_json(json_str: &str) -> Option<PageProbeState> {
+    let vals: [i64; 3] = serde_json::from_str(json_str.trim()).ok()?;
+    Some(PageProbeState {
+        scroll_x: vals[0].clamp(0, i32::MAX as i64) as i32,
+        scroll_y: vals[1].clamp(0, i32::MAX as i64) as i32,
+        active_uploads: vals[2] > 0,
+    })
+}
+
+pub fn probe_page_state(
+    webview: &KurowserWebView,
+    on_done: impl FnOnce(Option<PageProbeState>) + 'static,
+) {
+    const SCRIPT: &str = "(()=>{if(location.protocol==='kurowser:')return null;const de=document.documentElement;const x=Math.round(window.scrollX||(de&&de.scrollLeft)||0);const y=Math.round(window.scrollY||(de&&de.scrollTop)||0);const u=(window[Symbol.for('__kr_up')]||0)>0;return[x,y,u?1:0];})()";
+    let cb = Rc::new(RefCell::new(Some(on_done)));
+    let cb_done = Rc::clone(&cb);
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(move |error_code, result_json| {
+        if let Some(f) = cb_done.borrow_mut().take() {
+            let parsed = if error_code.is_ok() {
+                parse_page_probe_json(&result_json)
+            } else {
+                None
+            };
+            f(parsed);
+        }
+        Ok(())
+    }));
+    let js = HSTRING::from(SCRIPT);
+    if unsafe { webview.webview.ExecuteScript(&js, &handler) }.is_err() {
+        if let Some(f) = cb.borrow_mut().take() {
+            f(None);
+        }
+    }
+}
+
+pub fn restore_scroll_position(webview: &KurowserWebView, scroll_x: i32, scroll_y: i32) {
+    if scroll_x <= 0 && scroll_y <= 0 {
+        return;
+    }
+    let sx = scroll_x.max(0);
+    let sy = scroll_y.max(0);
+    let script = format!(
+        "(()=>{{const x={sx},y={sy};let stop=false;const c=()=>{{stop=true;}};window.addEventListener('wheel',c,{{once:true,passive:true}});window.addEventListener('touchstart',c,{{once:true,passive:true}});const go=()=>{{if(!stop)window.scrollTo(x,y);}};go();requestAnimationFrame(go);setTimeout(go,160);setTimeout(go,450);}})()"
+    );
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
+    let js = HSTRING::from(script);
+    let _ = unsafe { webview.webview.ExecuteScript(&js, &handler) };
+}
+
+pub fn begin_background(webview: &KurowserWebView) -> bool {
     let audio = is_playing_audio(webview);
     webview.set_visible(false);
     webview.set_memory_usage_level(MemoryLevel::Low);
+    audio
+}
 
-    if !audio {
-        if let Ok(core3) = webview.webview.cast::<ICoreWebView2_3>() {
-            let handler = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
-            if unsafe { core3.TrySuspend(&handler) }.is_ok() {
-                return (false, true);
-            }
+pub fn try_suspend(webview: &KurowserWebView) -> bool {
+    if is_playing_audio(webview) {
+        return false;
+    }
+    if let Ok(core3) = webview.webview.cast::<ICoreWebView2_3>() {
+        let handler = TrySuspendCompletedHandler::create(Box::new(|_, _| Ok(())));
+        if unsafe { core3.TrySuspend(&handler) }.is_ok() {
+            return true;
         }
+    }
+    false
+}
+
+pub fn suspend_background(webview: &KurowserWebView) -> (bool, bool) {
+    let audio = begin_background(webview);
+    if !audio && try_suspend(webview) {
+        return (false, true);
     }
     (audio, false)
 }
@@ -1715,6 +1947,119 @@ pub fn set_bounds(webview: &KurowserWebView, bounds: PixelRect) {
 pub fn apply_theme(webview: &KurowserWebView, bg: (u8, u8, u8), is_light: bool) {
     webview.set_background_color((bg.0, bg.1, bg.2, 255));
     webview.set_preferred_color_scheme(is_light);
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkingSetTrimReport {
+    pub attempted: usize,
+    pub trimmed: usize,
+}
+
+pub fn collect_descendant_pids(root_pid: u32, edges: &[(u32, u32)]) -> Vec<u32> {
+    let mut visited = HashSet::new();
+    visited.insert(root_pid);
+    let mut queue = VecDeque::new();
+    queue.push_back(root_pid);
+    let mut out = Vec::new();
+
+    while let Some(cur) = queue.pop_front() {
+        for &(pid, ppid) in edges {
+            if ppid == cur && visited.insert(pid) {
+                out.push(pid);
+                queue.push_back(pid);
+            }
+        }
+    }
+    out
+}
+
+pub fn is_webview2_process_exe(exe_name: &str) -> bool {
+    let base = exe_name.rsplit(['\\', '/']).next().unwrap_or(exe_name);
+    base.eq_ignore_ascii_case("msedgewebview2.exe")
+}
+
+fn process_creation_ticks(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    let mut created = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user).ok()?;
+    }
+    Some(((created.dwHighDateTime as u64) << 32) | (created.dwLowDateTime as u64))
+}
+
+pub fn trim_process_tree_working_set() -> WorkingSetTrimReport {
+    let mut report = WorkingSetTrimReport::default();
+    let root_created = unsafe { process_creation_ticks(GetCurrentProcess()) };
+
+    unsafe {
+        report.attempted += 1;
+        if EmptyWorkingSet(GetCurrentProcess()).is_ok() {
+            report.trimmed += 1;
+        }
+    }
+
+    let root_pid = unsafe { GetCurrentProcessId() };
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return report;
+    };
+
+    let mut edges = Vec::new();
+    let mut webview_pids = HashSet::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    unsafe {
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                edges.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if is_webview2_process_exe(&exe) {
+                    webview_pids.insert(entry.th32ProcessID);
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    for pid in collect_descendant_pids(root_pid, &edges) {
+        if !webview_pids.contains(&pid) {
+            continue;
+        }
+        unsafe {
+            let Ok(h) = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA,
+                false,
+                pid,
+            ) else {
+                continue;
+            };
+            let is_newer = match (root_created, process_creation_ticks(h)) {
+                (Some(r), Some(c)) => c >= r,
+                _ => true,
+            };
+            if is_newer {
+                report.attempted += 1;
+                if EmptyWorkingSet(h).is_ok() {
+                    report.trimmed += 1;
+                }
+            }
+            let _ = CloseHandle(h);
+        }
+    }
+
+    report
 }
 
 fn install_shields_script_blocking(
@@ -1869,5 +2214,57 @@ mod tests {
         );
         assert!(is_dangerous_scheme("JaVaScRiPt:alert(1)"));
         assert!(is_dangerous_scheme("data:text/html,<script>1</script>"));
+    }
+
+    #[test]
+    fn parses_page_probe_json_safely() {
+        assert_eq!(
+            parse_page_probe_json("[12,840,0]"),
+            Some(PageProbeState {
+                scroll_x: 12,
+                scroll_y: 840,
+                active_uploads: false
+            })
+        );
+        assert_eq!(
+            parse_page_probe_json("[-5, 100, 2]"),
+            Some(PageProbeState {
+                scroll_x: 0,
+                scroll_y: 100,
+                active_uploads: true
+            })
+        );
+        assert_eq!(parse_page_probe_json("null"), None);
+    }
+
+    #[test]
+    fn builds_browser_args_with_and_without_js_heap_cap() {
+        let uncapped = build_browser_args(0, false, false);
+        assert!(!uncapped.contains("--js-flags"));
+        assert!(!uncapped.contains("SpareRendererForSitePerProcess"));
+        assert!(!uncapped.contains("NetworkServiceInProcess2"));
+        let cap_256 = build_browser_args(256, true, true);
+        assert!(cap_256.contains("--js-flags=--max-old-space-size=256"));
+        assert!(cap_256.contains("SpareRendererForSitePerProcess"));
+        assert!(cap_256.contains("NetworkServiceInProcess2"));
+        assert!(cap_256.contains("--disable-breakpad"));
+        let cap_min = build_browser_args(16, false, false);
+        assert!(cap_min.contains("--js-flags=--max-old-space-size=128"));
+    }
+
+    #[test]
+    fn collects_descendant_pids_and_matches_webview2_exe() {
+        let edges = vec![
+            (100, 1),    // kurowser root (ppid 1)
+            (200, 100),  // browser-host
+            (201, 200),  // gpu
+            (202, 200),  // renderer
+            (300, 50),   // unrelated SearchHost webview2
+            (203, 202),  // nested utility/sub-worker
+        ];
+        assert_eq!(collect_descendant_pids(100, &edges), vec![200, 201, 202, 203]);
+        assert!(is_webview2_process_exe("msedgewebview2.exe"));
+        assert!(is_webview2_process_exe("C:\\Temp\\MSEdgeWebView2.EXE"));
+        assert!(!is_webview2_process_exe("DiscordSystemHelper.exe"));
     }
 }

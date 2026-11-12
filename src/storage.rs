@@ -388,8 +388,24 @@ impl ThemePalette {
     }
 }
 
+pub const DEFAULT_IDLE_DISCARD_SECS: u64 = 180;
+pub const DEFAULT_JS_HEAP_LIMIT_MB: u32 = 256;
+pub const DEFAULT_IDLE_TRIM_SECS: u64 = 180;
+
 fn default_true() -> bool {
     true
+}
+
+fn default_idle_discard_secs() -> u64 {
+    DEFAULT_IDLE_DISCARD_SECS
+}
+
+fn default_js_heap_limit_mb() -> u32 {
+    DEFAULT_JS_HEAP_LIMIT_MB
+}
+
+fn default_idle_trim_secs() -> u64 {
+    DEFAULT_IDLE_TRIM_SECS
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -399,6 +415,18 @@ pub struct Settings {
     pub custom_accent_hex: Option<String>,
     pub search_engine: SearchEngine,
     pub max_live_tabs: usize,
+    #[serde(default = "default_idle_discard_secs")]
+    pub idle_discard_secs: u64,
+    #[serde(default = "default_js_heap_limit_mb")]
+    pub js_heap_limit_mb: u32,
+    #[serde(default = "default_true")]
+    pub lean_webview_flags: bool,
+    #[serde(default = "default_true")]
+    pub network_in_process: bool,
+    #[serde(default = "default_true")]
+    pub trim_on_minimize: bool,
+    #[serde(default = "default_idle_trim_secs")]
+    pub idle_trim_secs: u64,
     #[serde(default)]
     pub sidebar_pinned: bool,
     #[serde(default = "default_true")]
@@ -422,6 +450,12 @@ impl Default for Settings {
             custom_accent_hex: None,
             search_engine: SearchEngine::Google,
             max_live_tabs: 3,
+            idle_discard_secs: DEFAULT_IDLE_DISCARD_SECS,
+            js_heap_limit_mb: DEFAULT_JS_HEAP_LIMIT_MB,
+            lean_webview_flags: true,
+            network_in_process: true,
+            trim_on_minimize: true,
+            idle_trim_secs: DEFAULT_IDLE_TRIM_SECS,
             sidebar_pinned: false,
             sidebar_hover_expand: true,
             adblock_enabled: true,
@@ -660,6 +694,9 @@ impl BrowserData {
 
         let mut settings: Settings = read_json(data_dir.join("settings.json")).unwrap_or_default();
         settings.max_live_tabs = settings.max_live_tabs.clamp(2, 4);
+        if settings.js_heap_limit_mb != 0 {
+            settings.js_heap_limit_mb = settings.js_heap_limit_mb.clamp(128, 4096);
+        }
         settings.custom_accent_hex = settings
             .custom_accent_hex
             .as_deref()
@@ -1237,5 +1274,11 @@ mod tests {
         assert!(parsed.auto_update);
         assert!(!parsed.sidebar_pinned);
         assert!(parsed.sidebar_hover_expand);
+        assert_eq!(parsed.idle_discard_secs, DEFAULT_IDLE_DISCARD_SECS);
+        assert_eq!(parsed.js_heap_limit_mb, DEFAULT_JS_HEAP_LIMIT_MB);
+        assert!(parsed.lean_webview_flags);
+        assert!(parsed.network_in_process);
+        assert!(parsed.trim_on_minimize);
+        assert_eq!(parsed.idle_trim_secs, DEFAULT_IDLE_TRIM_SECS);
     }
 }
